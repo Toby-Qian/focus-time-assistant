@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>专注时间助手 · 本机连接</title>
+<style>
+body{max-width:620px;margin:64px auto;padding:0 24px;background:#f2f5f2;color:#182f29;font:16px/1.8 "Microsoft YaHei",sans-serif}
+main{padding:32px;background:white;border-radius:18px}h1{font-size:25px;margin:0 0 12px}label{display:block;margin-top:18px}
+input,select{box-sizing:border-box;width:100%;padding:11px;border:1px solid #becfc4;border-radius:7px;font:inherit}
+button{margin-top:20px;border:0;border-radius:7px;padding:12px 24px;background:#23735b;color:white;font:inherit;cursor:pointer}
+p{color:#6a7c76}.small{font-size:13px}#status{color:#23735b}
+</style></head><body><main><h1>连接你的专注时间助手</h1>
+<p>先启动桌面程序，点击“浏览器扩展 → 复制连接码”，然后粘贴到这里。</p>
+<label for="token">本机连接码</label><input id="token" type="password" autocomplete="off" spellcheck="false">
+<label for="browser">当前浏览器</label><select id="browser"><option value="">自动识别 Chrome / Edge</option><option value="chrome.exe">Chrome</option><option value="msedge.exe">Edge</option><option value="brave.exe">Brave</option><option value="vivaldi.exe">Vivaldi</option><option value="opera.exe">Opera</option></select>
+<button id="save">保存并测试连接</button><div id="status" role="status"></div>
+<p class="small">只连接 127.0.0.1:17863。当前标签页标题用于前台核对，不写入活动数据库；只保存网站域名和累计时长。扩展不读取网页正文、密码或键盘输入。无痕窗口默认不监测。</p>
+</main><script src="options.js"></script></body></html>

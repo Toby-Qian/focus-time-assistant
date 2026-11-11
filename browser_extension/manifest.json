@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "专注时间助手 · 本机连接",
+  "version": "1.1.0",
+  "description": "把当前活动标签页的域名（和浏览器已缓存的网站图标）发送给本机专注时间助手，不上传云端。",
+  "permissions": ["tabs", "storage", "alarms", "favicon"],
+  "host_permissions": ["http://127.0.0.1:17863/*"],
+  "background": {"service_worker": "background.js"},
+  "options_page": "options.html",
+  "action": {"default_title": "点击设置本机连接码"}
+}

@@ -1,0 +1,19 @@
+# Personal data: records, settings (contains the extension pairing code), logs, icon caches
+data/
+exports/
+
+# Local environment and build output
+.venv/
+__pycache__/
+*.pyc
+程序/
+*.lnk
+*.tmp
+
+# Local working material that stays on this computer
+90_过程文件/
+99_历史版本/
+02_参考资料/
+04_交付成果/
+PRODUCT.md
+.impeccable/
