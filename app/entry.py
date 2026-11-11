@@ -77,6 +77,14 @@ def main():
         if windows.signal_wake(name+".Show"):
             return
     QGuiApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+    if not getattr(sys, "frozen", False):
+        # Run from source the process is pythonw.exe, so the taskbar would group it under Python
+        # and show Python's icon. An own AppUserModelID makes it use this window's icon instead.
+        # (The EXE keeps the default: its embedded icon matches the pinned shortcut.)
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("FocusTimeAssistant.Desktop")
+        except (AttributeError, OSError):
+            pass
     application = QApplication(sys.argv[:1]); application.setApplicationName("专注时间助手"); application.setQuitOnLastWindowClosed(False)
     theme.use(saved_theme(args.data_dir/"settings.json"))
     theme.setup(application, args.data_dir/"theme_cache")
