@@ -96,6 +96,11 @@ def _tile(text, category):
     return result
 
 
+def ready(key: str, category: str = "unknown") -> bool:
+    """Whether icon_for() would answer from the cache (no shell call)."""
+    return _seen_version == windows.paths_version and (key, category) in _cache
+
+
 def icon_for(key: str, category: str = "unknown") -> QIcon:
     """`key` is a program (".exe"), a system surface ("界面:…") or a website domain."""
     global _provider, _seen_version
@@ -115,7 +120,12 @@ def icon_for(key: str, category: str = "unknown") -> QIcon:
         _provider = _provider or QFileIconProvider()
         found = _provider.icon(QFileInfo(path))
         if not found.isNull():
-            result = found
+            # A shell icon asks Windows for a fresh bitmap on every paint (2–3 ms each); keep fixed sizes instead.
+            result = QIcon()
+            for size in (32, 48):  # each size costs one shell call (~14 ms); smaller sizes are scaled from these
+                pixmap = found.pixmap(size, size)
+                if not pixmap.isNull(): result.addPixmap(pixmap)
+            if result.isNull(): result = found
     if result is None and not key.endswith(".exe") and "." in key and not key.startswith("界面:"):
         result = _site_icon(key)
     if result is None:

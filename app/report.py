@@ -13,7 +13,7 @@ from pathlib import Path
 from core import CATEGORIES, EXPORT_PARTS
 from charts import focus_ratio, short_time, tick_label
 from insights import insights
-from theme import CATEGORY_LIGHT, app_name, readable
+from theme import CATEGORY_LIGHT, app_name, label, readable, site_name
 
 COLORS = CATEGORY_LIGHT[0]
 TEXT_COLORS = {key: readable(value, "#FFFFFF") for key, value in COLORS.items()}  # text in a category colour, 4.5:1 on white
@@ -148,7 +148,7 @@ details summary{{cursor:pointer;color:var(--accent)}} footer{{color:var(--muted)
         apps = data["apps"][:40]; top = apps[0][3] if apps else 1
         out.append("<section class='card'><h2>应用与网站排行</h2><table><tr><th>应用 / 网站</th><th>主要分类</th><th style='width:34%'></th><th>累计</th><th>天数</th></tr>")
         for app, host, cat, seconds, days in apps:
-            out.append(f"<tr><td>{escape(host or app_name(app))}</td><td><i class='dot' style='background:{COLORS[cat]}'></i>{CATEGORIES[cat]}</td>"
+            out.append(f"<tr><td>{escape(label(app, host))}</td><td><i class='dot' style='background:{COLORS[cat]}'></i>{CATEGORIES[cat]}</td>"
                        f"<td><div class='bar'><i style='width:{max(2, 100*seconds/top):.1f}%;background:{COLORS[cat]}'></i></div></td>"
                        f"<td class='num'>{short_time(seconds)}</td><td class='num'>{days}</td></tr>")
         out.append("</table>" + ("" if apps else "<p class='sub'>这段时间没有记录。</p>") + "</section>")
@@ -172,7 +172,7 @@ details summary{{cursor:pointer;color:var(--accent)}} footer{{color:var(--muted)
         for day, entries in reversed(list(data["details"].items())):
             if not entries: continue
             out.append(f"<details><summary>{day}（{len(entries)} 项）</summary><table><tr><th>分类</th><th>应用</th><th>域名</th><th>时长</th></tr>")
-            out += [f"<tr><td><i class='dot' style='background:{COLORS[c]}'></i>{CATEGORIES[c]}</td><td>{escape(app_name(a) or '离开 / 锁屏')}</td><td>{escape(h or '—')}</td><td class='num'>{hms(s)}</td></tr>" for c, a, h, s in entries]
+            out += [f"<tr><td><i class='dot' style='background:{COLORS[c]}'></i>{CATEGORIES[c]}</td><td>{escape(app_name(a) or '离开 / 锁屏')}</td><td>{escape(site_name(h)+('（'+h+'）' if site_name(h) != h else '') if h else '—')}</td><td class='num'>{hms(s)}</td></tr>" for c, a, h, s in entries]
             out.append("</table></details>")
         out.append("</section>")
     out.append("<footer>由专注时间助手在本机生成 · 数据只来自这台电脑</footer></main></body></html>")

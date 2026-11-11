@@ -50,6 +50,9 @@ DEFAULTS = {
     "daily_summary": "off",  # "off" or the HH:MM at which today's summary is shown once
     "return_prompt_minutes": 15,  # back after at least this long away: offer to count it as work (0 = never)
     "app_limits": {},  # {"x.exe" or "domain": daily minutes} — one reminder when reached
+    "app_names": {},  # {"x.exe": "display name"} — the user's own names for programs
+    "site_names": {},  # {"domain": "display name"} — the user's own names for websites (subdomains included)
+    "overview_away": True,  # overview shares, ring and hourly bars include away time
     "work_goal_minutes": 360, "distraction_limit_minutes": 30, "focus_minutes": 25, "rest_after_minutes": 0,
     # Focus sessions: a short break after each completed session (0 = none), the floating timer,
     # recently used task names (newest first) and where the floating timer was left.
@@ -127,6 +130,13 @@ def validate_config(config: dict):
     if not isinstance(limits, dict) or any(not isinstance(k, str) or len(k) > 253 or not isinstance(v, int) or isinstance(v, bool) or not 1 <= v <= 1440
                                            for k, v in limits.items()):
         config["app_limits"] = {}
+    for key in ("site_names", "app_names"):
+        names = config.get(key)
+        if not isinstance(names, dict) or any(not isinstance(k, str) or not 0 < len(k) <= 253 or not isinstance(v, str) or not 0 < len(v.strip()) <= 30
+                                              for k, v in names.items()):
+            config[key] = {}
+    if not isinstance(config.get("overview_away"), bool):
+        config["overview_away"] = True
     if config.get("daily_summary") not in ("off", "18:00", "20:00", "21:00", "22:00", "23:00"):
         config["daily_summary"] = "off"
     if not isinstance(config.get("focus_float"), bool):

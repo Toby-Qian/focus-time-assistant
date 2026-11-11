@@ -141,7 +141,7 @@ def check():
         w.own_window=False; w.skipped=False; w.background=""  # tick() sampled the real foreground window
         # Analysis: calendar, findings and focus sessions.
         w.navigate(1); w.refresh_analysis()
-        assert w.heatmap.work and w.insight_label.text() and w.session_table.rowCount()>=1 and w.session_table.isVisible(), (bool(w.heatmap.work), bool(w.insight_label.text()), w.session_table.rowCount(), w.session_table.isVisible(), w.pages.currentIndex())
+        assert w.heatmap.totals and w.insight_label.text() and w.session_table.rowCount()>=1 and w.session_table.isVisible(), (bool(w.heatmap.totals), bool(w.insight_label.text()), w.session_table.rowCount(), w.session_table.isVisible(), w.pages.currentIndex())
         w.navigate(0)
         # Daily summary, backup, tray colour and program icons.
         w.config["daily_summary"]="00:00"; w.summary_day=None; w.check_summary()

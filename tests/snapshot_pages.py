@@ -74,6 +74,8 @@ def shoot():
         if index == 0:
             w.rhythm_mode.setCurrentIndex(1); settle(); w.grab().save(str(out/"1b_timeline.png"))
             w.rhythm_mode.setCurrentIndex(0); q.processEvents()
+            w.toggle_away(); settle(); w.grab().save(str(out/"1c_without_away.png"))
+            w.toggle_away(); q.processEvents()
         if index == 2:
             w.notify("已设为工作：修正 1 条记录，以后也这样记录", lambda: None); q.processEvents()
             w.grab().save(str(out/"3b_toast.png")); w.toast.hide()
@@ -88,6 +90,11 @@ def shoot():
     w.navigate(1); settle(); area = w.pages.currentWidget()
     if isinstance(area, QScrollArea): area.verticalScrollBar().setValue(area.verticalScrollBar().maximum()); settle(.2)
     w.grab().save(str(out/"2b_analysis_lower.png"))
+    bar = area.verticalScrollBar(); bar.setValue(bar.maximum()//2); settle(.2); w.grab().save(str(out/"2c_analysis_middle.png"))
+    w.show_analysis_day(datetime.now().date().isoformat()); settle()  # today: the hour mark path
+    assert w.analysis_dates()[0] == datetime.now().date().isoformat() and "前一天" in w.compare_title.text()
+    w.show_analysis_day((start-timedelta(days=5)).date().isoformat()); settle(); w.grab().save(str(out/"2d_analysis_day.png"))
+    bar.setValue(bar.maximum()//2); settle(.2); w.grab().save(str(out/"2e_analysis_day_middle.png"))
     from desktop import Reminder
     popup = Reminder(w, w.current); popup.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen); popup.show(); q.processEvents(); popup.grab().save(str(out/"6_reminder.png")); popup.close()
     print("saved", out, "dpr", w.devicePixelRatioF())

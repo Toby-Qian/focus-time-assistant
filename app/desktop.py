@@ -27,9 +27,9 @@ from PySide6.QtWidgets import (QApplication, QWidget, QFrame, QVBoxLayout, QHBox
     QDialog, QFormLayout, QComboBox, QLineEdit, QDialogButtonBox, QSystemTrayIcon, QMenu, QGraphicsDropShadowEffect)
 from core import Activity, Accountant, CATEGORIES, IGNORE, LABELS, OWN_WINDOW_MODES, RULE_TARGETS, Store, SITES, classify, hostname, load_config, save_config, streaks
 from core import SURFACES, SURFACE_TARGETS, SURFACE_PREFIX
-from insights import insights
+from insights import insights, work_rhythm
 from bridge import BrowserState, start_bridge
-from theme import ACCENT, COLORS, INK, P, TEXTS, THEMES, TINTS, MUTED, SUBTLE, app_name, icon
+from theme import ACCENT, COLORS, INK, P, TEXTS, THEMES, TINTS, MUTED, SUBTLE, app_name, icon, key_name, label, site_name
 from charts import focus_ratio, short_time, share
 from ui_qt import Shell, CategoryDelegate, IconLabel, Segmented, text, button, restyle, set_text, fade_in
 import theme
@@ -75,7 +75,7 @@ class Reminder(QWidget):
         body = QFrame(); body.setObjectName("card"); outer.addWidget(body)
         body.setStyleSheet(f"QFrame#card{{background:{P['card']};border:1px solid {P['line']};border-top:5px solid {COLORS['distraction']};border-radius:16px;}}")
         layout = QVBoxLayout(body); layout.setContentsMargins(30, 26, 30, 24); layout.setSpacing(12)
-        target = activity.site or activity.host or app_name(activity.app)
+        target = (site_name(activity.host) if activity.host else activity.site) or app_name(activity.app)
         top = QHBoxLayout(); top.setSpacing(14)
         badge = QFrame(); badge.setFixedSize(52, 52); badge.setStyleSheet(f"background:{TINTS['distraction']};border-radius:14px;")
         inner = QHBoxLayout(badge); inner.setContentsMargins(12, 12, 12, 12); inner.addWidget(IconLabel(icon("distraction", COLORS["distraction"], 28), 28))
@@ -329,10 +329,13 @@ class RuleDialog(QDialog):
 
 
 class App(Shell):
+    analysis_day = None  # one day picked from the calendar / a bar, instead of a range
+    analysis_last = None  # last day of what the analysis page shows
     def __init__(self, data_dir: Path, project: Path, testing=False):
         super().__init__()
         self.project = project; self.data_dir = data_dir; self.testing = testing
         self.config_path = data_dir/"settings.json"; self.config = load_config(self.config_path)
+        theme.SITE_ALIASES = self.config["site_names"]; theme.APP_ALIASES = self.config["app_names"]
         self.store = Store(data_dir/"activity.sqlite3"); self.accountant = Accountant(self.store)
         appicons.load(data_dir/"app_paths.json", data_dir/"site_icons")
         self.icon_version = 0; self.paths_seen = windows.paths_version
@@ -519,12 +522,16 @@ class App(Shell):
                 self.icon_version = self.browser.icon_version; appicons.clear(); self.manager_signature = None
             self.update_tray_icon()
             if self.ticks % TRAY_TIP_EVERY == 0: self.update_tray_tip()
-            self.refresh()
         except Exception:
             logging.exception("Sampling failed"); self.accountant.previous = None
             if not self.last_error:
                 self.last_error = "采样暂时失败，此段未计时。"; self.notify(self.last_error)
             self.sidebar_status.setText("●  记录异常")
+        # Redrawing the window is separate from recording: a display bug is logged but never costs recorded time.
+        try:
+            self.refresh()
+        except Exception:
+            logging.exception("Refresh failed")
 
     def expire_learning(self, mono):
         for site, until in list(self.learning.items()):
@@ -567,7 +574,7 @@ class App(Shell):
             if self.goal_flags.get(flag): continue
             used = self.store.used_today(today, key)
             if used >= minutes*60:
-                self.goal_flags[flag] = True; name = app_name(key)
+                self.goal_flags[flag] = True; name = key_name(key)
                 self.notify(f"{name} 今天已用 {short_time(used)}，到了你设的 {minutes} 分钟上限。", label="", seconds=8)
                 self.tray_message(f"{name} 到上限了", f"今天已用 {short_time(used)}，上限 {minutes} 分钟。", QSystemTrayIcon.MessageIcon.Warning, 6000)
                 if self.config["reminder_sound"]: self.beep()
@@ -576,12 +583,47 @@ class App(Shell):
         """Ask for a daily limit in minutes for a program or website; 0 removes it."""
         from PySide6.QtWidgets import QInputDialog
         current = self.config["app_limits"].get(key, 0)
-        minutes, ok = QInputDialog.getInt(self, "每日上限", f"“{app_name(key)}”每天最多用多少分钟？\n到了提醒一次，填 0 取消上限。", current, 0, 1440, 5)
+        minutes, ok = QInputDialog.getInt(self, "每日上限", f"“{key_name(key)}”每天最多用多少分钟？\n到了提醒一次，填 0 取消上限。", current, 0, 1440, 5)
         if not ok or minutes == current: return
         if minutes: self.config["app_limits"][key] = minutes
         else: self.config["app_limits"].pop(key, None)
         self.goal_flags.pop("app:"+key, None); save_config(self.config_path, self.config); self.refresh_rules()
-        self.notify(f"{app_name(key)} 每日上限：{minutes} 分钟。" if minutes else f"已取消 {app_name(key)} 的每日上限。")
+        self.notify(f"{key_name(key)} 每日上限：{minutes} 分钟。" if minutes else f"已取消 {key_name(key)} 的每日上限。")
+
+    def rename_site(self, host):
+        """The user's own name for a website; it covers subdomains (saved without "www.")."""
+        domain = host[4:] if host.startswith("www.") else host
+        self.rename("site_names", domain, theme.site_default(domain) or domain, "给网站改名",
+                    f"{domain} 显示为（包括它的子域名）")
+
+    def rename_app(self, app):
+        """The user's own name for a program, e.g. weixin.exe → 微信."""
+        self.rename("app_names", app, theme.app_default(app) or app, "给应用改名", f"{app} 显示为")
+
+    def rename(self, store, key, default, title, prompt):
+        """Ask for a display name; an empty name (or the default) restores the default. Undoable."""
+        from PySide6.QtWidgets import QInputDialog
+        names = self.config[store]
+        name, ok = QInputDialog.getText(self, title, f"{prompt}；留空恢复为“{default}”：", text=names.get(key) or default)
+        if not ok: return
+        name = name.strip()[:30]; before = names.get(key)
+        if not name or name in (default, key): names.pop(key, None)
+        else: names[key] = name
+        if names.get(key) == before: return
+        def apply():
+            theme.SITE_ALIASES = self.config["site_names"]; theme.APP_ALIASES = self.config["app_names"]
+            save_config(self.config_path, self.config); self.redraw_names()
+        def undo():
+            if before is None: names.pop(key, None)
+            else: names[key] = before
+            apply()
+        apply()
+        self.notify(f"{key} 以后显示为“{names.get(key, default)}”。", undo, seconds=6)
+
+    def redraw_names(self):
+        self.manager_signature = None
+        self.refresh(force=True)
+        if self.pages.currentIndex() != 3: self.refresh_rules()
 
     def update_tray_icon(self):
         """The tray icon takes the colour of what is being recorded, so a glance at the taskbar is enough."""
@@ -601,7 +643,7 @@ class App(Shell):
         else: text += "。"
         used = [(seconds, app, host) for cat, app, host, seconds in self.store.details(today) if cat not in ("idle",) and (app or host)]
         if used:
-            _, app, host = max(used); text += f"用得最多：{host or app_name(app)}。"
+            _, app, host = max(used); text += f"用得最多：{label(app, host)}。"
         self.notify("今日总结 · "+text, seconds=10)
         self.tray_message("今日总结", text, QSystemTrayIcon.MessageIcon.Information, 8000)
 
@@ -687,15 +729,21 @@ class App(Shell):
 
     def refresh_overview(self, charts):
         today = datetime.now().date().isoformat()
-        totals = self.store.totals(today); total = sum(totals.values())
-        for key, label in self.card_values.items():
-            set_text(label, duration(totals[key])); set_text(self.card_shares[key], share(totals[key], total))
-            self.stat_cards[key].bar.set_ratio(totals[key]/total if total else 0)
+        totals = self.store.totals(today); away = self.config["overview_away"]
+        # Without away time the shares, the ring and the hourly bars describe only the time at the computer.
+        counted = totals if away else {**totals, "idle": 0.0}; total = sum(counted.values())
+        for key, value in self.card_values.items():
+            set_text(value, duration(totals[key]))
+            left_out = not away and key == "idle"
+            set_text(self.card_shares[key], "不计入" if left_out else share(counted[key], total))
+            restyle(self.card_shares[key], f"background:{P['track'] if left_out else TINTS[key]};color:{SUBTLE if left_out else TEXTS[key]};")
+            restyle(value, f"color:{SUBTLE};" if left_out else "")
+            self.stat_cards[key].bar.set_ratio(counted[key]/total if total else 0)
         current = self.current; category = "idle" if self.paused else current.category
         name = ("专注时间助手（本窗口）" if self.own_window else self.background if self.background else
-                current.host or current.site or app_name(current.app) or "等待前台活动")
+                (site_name(current.host) if current.host else current.site) or app_name(current.app) or "等待前台活动")
         set_text(self.now_label, "记录已暂停" if self.paused else name)
-        self.now_label.setToolTip(current.app or "")
+        self.now_label.setToolTip(current.host or current.app or "")
         set_text(self.running_badge, "已暂停" if self.paused else LABELS[current.category])
         restyle(self.running_badge, f"background:{TINTS[category]};color:{MUTED if self.paused else TEXTS[category]};")
         restyle(self.now_badge, f"background:{TINTS[category]};border-radius:12px;")
@@ -718,10 +766,16 @@ class App(Shell):
         self.classify_current.setEnabled(not self.paused and (self.own_window or bool(self.background) or (bool(current.app or current.host) and not self.idle_now)))
         if not charts: return
         self.refresh_deltas(totals)
-        self.donut.set_data(totals)
-        for key, label in self.legend_values.items(): set_text(label, share(totals[key], total))
+        self.donut.set_data(counted, "今日已记录" if away else "不含离开")
+        set_text(self.away_toggle, "含离开" if away else "不含离开")
+        for key, value in self.legend_values.items():
+            left_out = not away and key == "idle"
+            set_text(value, "不计入" if left_out else share(counted[key], total))
+            restyle(value, f"color:{SUBTLE};font-size:12px;" if left_out else "")
+            set_text(self.legend_times[key], short_time(totals[key]) if totals[key] >= 60 else "<1分钟" if totals[key] else "—")
         hourly = {str(i).zfill(2): dict.fromkeys(CATEGORIES, 0.0) for i in range(24)}
-        for hour, category, seconds in self.store.hourly(today): hourly[hour][category] = seconds
+        for hour, category, seconds in self.store.hourly(today):
+            if away or category != "idle": hourly[hour][category] = seconds
         recorded = sum(sum(v.values()) for v in hourly.values())
         # Show only the part of the day that has happened: from an hour before the first record up to now.
         now_hour = datetime.now().hour
@@ -734,12 +788,11 @@ class App(Shell):
         rows = [(f"{h:02d}", hourly[f"{h:02d}"]) for h in range(first, last+1)]
         self.hour_chart.set_data(rows if recorded else []); self.hour_chart.set_mark(now_hour-first if recorded else None)
         if self.rhythm_stack.currentIndex() == 1:
-            minutes = [(m, cat, host or app_name(app) or "离开 / 锁屏", host or app) for m, cat, app, host in self.store.timeline(today)]
+            minutes = [(m, cat, label(app, host) or "离开 / 锁屏", host or app) for m, cat, app, host in self.store.timeline(today) if away or cat != "idle"]
             self.timeline.set_data(minutes, (first, min(24, last+1)))
         line = self.rhythm_stack.currentIndex() == 1
-        set_text(self.hour_note, "时段图只含升级后的分钟记录；旧版每日汇总仍完整保留在合计里。" if total-recorded > 3 else
-                 "每一竖条是一分钟，颜色是那一分钟主要在做的事；悬停查看，点击查看明细。" if line else
-                 "悬停柱子查看该小时各类时长；点击右侧环形图查看明细。")
+        set_text(self.hour_note, "时段图只含分钟记录，旧版汇总算在合计里" if total-recorded > 3 else
+                 "一竖条一分钟 · 悬停查看，点击看明细" if line else "悬停查看各类时长 · 点环形图看明细")
         grouped = {}
         for cat, app, host, seconds in self.store.details(today):
             if cat == "idle": continue
@@ -747,7 +800,14 @@ class App(Shell):
             entry[0] += seconds
             if seconds > entry[2]: entry[1], entry[2] = cat, seconds
         ranked = sorted(grouped.items(), key=lambda row: row[1][0], reverse=True)
-        self.rank_list.set_data([(host or app_name(app), host or app, cat, seconds) for (app, host), (seconds, cat, _) in ranked])
+        self.rank_list.set_data([(label(app, host), host or app, cat, seconds) for (app, host), (seconds, cat, _) in ranked], total)
+
+    def toggle_away(self):
+        """The quiet 含离开 / 不含离开 switch on the overview; mirrors 设置 → 总览占比."""
+        away = not self.config["overview_away"]
+        self.config["overview_away"] = away; save_config(self.config_path, self.config)
+        self.away_combo.blockSignals(True); self.away_combo.setCurrentIndex(0 if away else 1); self.away_combo.blockSignals(False)
+        self.refresh_overview(True)
 
     def switch_rhythm(self, index):
         """按小时 / 时间线; the choice is remembered."""
@@ -774,35 +834,129 @@ class App(Shell):
             set_text(card.delta, f"比昨天此时{'多' if diff > 0 else '少'} {short_time(abs(diff))}")
             restyle(card.delta, f"color:{colour};")
 
+    # ── time analysis ─────────────────────────────────────────────────
+    def analysis_span(self):
+        """(number of days, days back from today to the last one) of what the analysis page shows."""
+        if self.analysis_day:
+            return 1, (datetime.now().date()-datetime.fromisoformat(self.analysis_day).date()).days
+        return self.range_combo.currentData()
+
+    def analysis_dates(self):
+        count, back = self.analysis_span()
+        last = datetime.now().date()-timedelta(days=back)
+        return (last-timedelta(days=count-1)).isoformat(), last.isoformat()
+
+    @staticmethod
+    def day_name(day):
+        date = datetime.fromisoformat(day).date(); today = datetime.now().date()
+        tag = "今天" if date == today else "昨天" if (today-date).days == 1 else "周"+"一二三四五六日"[date.weekday()]
+        return f"{date.month}月{date.day}日 {tag}"
+
+    def range_name(self, first, last):
+        if first == last: return self.day_name(first)
+        a, b = datetime.fromisoformat(first), datetime.fromisoformat(last)
+        return f"{a.month}月{a.day}日 – {b.month}月{b.day}日"
+
+    def choose_range(self):
+        """A range segment was clicked: leave the single-day view."""
+        self.analysis_day = None; self.refresh_analysis()
+
+    def show_analysis_day(self, day):
+        """Analyse one day (from the calendar, a bar or the daily table)."""
+        if not day or day > datetime.now().date().isoformat(): return
+        presets = {datetime.now().date().isoformat(): 0, (datetime.now().date()-timedelta(days=1)).isoformat(): 1}
+        if day in presets:  # 今天 / 昨天 have their own segment
+            self.analysis_day = None; self.range_combo.blockSignals(True); self.range_combo.setCurrentIndex(presets[day]); self.range_combo.blockSignals(False)
+        else:
+            self.analysis_day = day; self.range_combo.clearSelection()
+        if self.pages.currentIndex() != 1: self.navigate(1)
+        else: self.refresh_analysis()
+        self.analysis_view.verticalScrollBar().setValue(0); fade_in(self.analysis_view.widget())
+
+    def shift_analysis_day(self, step):
+        day = datetime.fromisoformat(self.analysis_day or self.analysis_dates()[1]).date()+timedelta(days=step)
+        self.show_analysis_day(day.isoformat())
+
+    def mix_chosen(self, category):
+        first, last = self.analysis_dates()
+        if first == last: self.open_manager(category=category, day=last)
+
     def refresh_analysis(self):
-        count, back = self.range_combo.currentData()
-        today = datetime.now().date(); last = today-timedelta(days=back); days = {}
-        for i in range(count-1, -1, -1): days[(last-timedelta(days=i)).isoformat()] = dict.fromkeys(CATEGORIES, 0.0)
-        for day, totals in self.store.day_totals(min(days), max(days)).items():
+        first_day, last_day = self.analysis_dates(); self.analysis_last = last_day
+        today = datetime.now().date(); single = first_day == last_day
+        first, last = datetime.fromisoformat(first_day).date(), datetime.fromisoformat(last_day).date()
+        count = (last-first).days+1
+        days = {(first+timedelta(days=i)).isoformat(): dict.fromkeys(CATEGORIES, 0.0) for i in range(count)}
+        for day, totals in self.store.day_totals(first_day, last_day).items():
             if day in days: days[day].update(totals)
-        self.trend_chart.set_data(list(days.items())); self.trend_chart.set_mark(count-1 if back == 0 else None)
         summed = {key: sum(x[key] for x in days.values()) for key in CATEGORIES}
         active = [d for d in days.values() if sum(d.values())]
-        ratio = self.focus_of(summed)
+        # The previous stretch of the same length, for the comparison card.
+        before_last = first-timedelta(days=1); before_first = before_last-timedelta(days=count-1)
+        before = dict.fromkeys(CATEGORIES, 0.0)
+        for totals in self.store.day_totals(before_first.isoformat(), before_last.isoformat()).values():
+            for key in CATEGORIES: before[key] += totals[key]
+
+        # Controls: which day / range, and how much of it has records.
+        self.day_box.setVisible(bool(self.analysis_day)); self.day_detail.setVisible(single)
+        if self.analysis_day:
+            self.day_label.setText(self.day_name(self.analysis_day)); self.day_next.setEnabled(last < today)
+        set_text(self.range_note, ("" if self.analysis_day else self.range_name(first_day, last_day)+" · ") +
+                 ("当天没有记录" if single and not active else "" if single else f"{count} 天中 {len(active)} 天有记录"))
+
+        # KPIs
+        ratio = self.focus_of(summed); present = sum(v for k, v in summed.items() if k != "idle")
+        goal, limit = self.config["work_goal_minutes"]*60, self.config["distraction_limit_minutes"]*60
         set_text(self.kpis["work"], short_time(summed["work"]))
-        set_text(self.kpis["average"], short_time(summed["work"]/len(active)) if active else "—")
+        set_text(self.kpis["work"].sub, (f"目标 {short_time(goal)} · 完成 {summed['work']/goal:.0%}" if goal else "当天工作合计") if single else
+                 f"日均 {short_time(summed['work']/len(active))}" if active else "没有记录")
         set_text(self.kpis["distraction"], short_time(summed["distraction"]))
+        set_text(self.kpis["distraction"].sub, (f"上限 {short_time(limit)}" + (" · 已超出" if summed["distraction"] > limit else "") if limit else "当天摸鱼合计") if single else
+                 f"日均 {short_time(summed['distraction']/len(active))}" if active else "没有记录")
         set_text(self.kpis["focus"], f"{ratio:.0%}" if ratio is not None else "—")
-        first_day, last_day = min(days), max(days)
-        completed = sum(1 for row in self.store.session_list(first_day, last_day) if row[5])
+        set_text(self.kpis["focus"].sub, "离开和系统工具不算在内")
+        set_text(self.kpis["present"], short_time(present))
+        set_text(self.kpis["present"].sub, f"另有离开 {short_time(summed['idle'])}" if summed["idle"] >= 60 else "除离开以外的记录")
+        sessions = self.store.session_list(first_day, last_day); completed = sum(1 for row in sessions if row[5])
         set_text(self.kpis["sessions"], f"{completed} 次")
-        self.range_rank.set_data([(host or app_name(app), host or app, cat, seconds) for app, host, cat, seconds, _ in self.store.range_apps(first_day, last_day)])
+        set_text(self.kpis["sessions"].sub, f"开始 {len(sessions)} 次 · 共 {short_time(sum(row[2] for row in sessions))}" if sessions else "这段时间没有专注")
+
+        # Composition ring: the same 含离开 / 不含离开 choice as the overview.
+        away = self.config["overview_away"]; counted = summed if away else {**summed, "idle": 0.0}; total = sum(counted.values())
+        self.mix_donut.hint = "点击查看当天明细" if single else ""
+        self.mix_donut.set_data(counted, "当天" if single else f"{count} 天合计")
+        set_text(self.mix_note, "含离开" if away else "不含离开")
+        self.mix_note.setToolTip("占比是否计入离开时间；在“规则与设置 → 分析与导出 → 总览占比”里修改")
+        for key, value in self.mix_values.items():
+            left_out = not away and key == "idle"
+            set_text(value, "不计入" if left_out else share(counted[key], total))
+            restyle(value, f"color:{SUBTLE};font-size:12px;" if left_out else "")
+            set_text(self.mix_times[key], short_time(summed[key]) if summed[key] >= 60 else "<1分钟" if summed[key] else "—")
+            self.mix_bars[key].set_ratio(0 if left_out or not total else counted[key]/total)
+
+        # Daily bars only make sense for more than one day; one day shows its own hours below.
+        self.trend_card.setVisible(not single); self.history_card.setVisible(not single)
+        if not single:
+            self.trend_chart.set_data(list(days.items())); self.trend_chart.set_mark(count-1 if last == today else None)
+        self.range_rank.set_data([(label(app, host), host or app, cat, seconds) for app, host, cat, seconds, _ in self.store.range_apps(first_day, last_day)],
+                                 present)
         profile_days, profile = self.store.hour_profile(first_day, last_day)
         hours = {f"{h:02d}": dict.fromkeys(CATEGORIES, 0.0) for h in range(24)}
-        for hour, key, seconds in profile: hours[hour][key] = seconds
-        self.profile_chart.set_data(list(hours.items()) if profile else []); self.profile_chart.set_mark(None)
-        set_text(self.profile_note, f"按有分钟记录的 {profile_days} 天平均；看看自己一般在什么时段专注、什么时段分心。" if profile_days else "这段时间还没有分钟记录。")
+        for hour, key, seconds in profile:
+            if away or key != "idle": hours[hour][key] = seconds
+        self.profile_chart.set_data(list(hours.items()) if profile else []); self.profile_chart.set_mark(datetime.now().hour if single and last == today else None)
+        set_text(self.profile_title, "当天每小时" if single else "一天中的时段分布")
+        set_text(self.profile_note, ("这一天每个小时在做什么。" if single else f"按有分钟记录的 {profile_days} 天平均；看看自己一般在什么时段专注、什么时段分心。")
+                 if profile_days else "这段时间还没有分钟记录。")
+
+        self.refresh_rhythm(first_day, last_day)
+        self.refresh_compare(summed, before, single, count, before_first, before_last)
         self.refresh_focus_story(today, first_day, last_day)
+        if single: return
         self.history_table.setRowCount(len(days))
         for row, (day, totals) in enumerate(reversed(list(days.items()))):
-            date = datetime.fromisoformat(day)
-            label = QTableWidgetItem(f"{date.month}月{date.day}日 " + ("今天" if day == today.isoformat() else "昨天" if (today-date.date()).days == 1 else "周"+"一二三四五六日"[date.weekday()]))
-            label.setData(Qt.ItemDataRole.UserRole, day); self.history_table.setItem(row, 0, label)
+            day_item = QTableWidgetItem(self.day_name(day))
+            day_item.setData(Qt.ItemDataRole.UserRole, day); self.history_table.setItem(row, 0, day_item)
             for col, key in enumerate(CATEGORIES, 1):
                 item = QTableWidgetItem(duration(totals[key]) if totals[key] else "—")
                 item.setForeground(QColor(TEXTS[key] if totals[key] else SUBTLE)); self.history_table.setItem(row, col, item)
@@ -812,19 +966,66 @@ class App(Shell):
         # Show every day without an inner scrollbar; the page itself scrolls.
         self.history_table.setFixedHeight(self.history_table.horizontalHeader().height()+40*len(days)+4)
 
+    def refresh_rhythm(self, first_day, last_day):
+        """工作节奏: longest stretch, deep work, switching and the usual start / end of the day."""
+        now = datetime.now()  # days that are over do not change: recompute only while the range includes today
+        stamp = (first_day, last_day, now.strftime("%H:%M") if last_day >= now.date().isoformat() else "")
+        if getattr(self, "rhythm_cache", (None,))[0] != stamp:
+            self.rhythm_cache = (stamp, work_rhythm(self.store, first_day, last_day))
+        r = self.rhythm_cache[1]; rows = self.rhythm_rows; single = first_day == last_day
+        clock = lambda minute: f"{int(minute)//60:02d}:{int(minute) % 60:02d}"
+        def put(key, value, note=""):
+            set_text(rows[key][0], value); set_text(rows[key][1], note)
+        if r["longest"]:
+            minutes, day, begin = r["longest"]
+            put("longest", short_time(minutes*60), ("" if single else self.day_name(day.isoformat())+" ")+f"{clock(begin)} 开始")
+        else: put("longest", "—", "这段时间没有工作记录")
+        count, minutes = r["deep"]
+        put("deep", f"{count} 段" if count else "0 段", f"连续 25 分钟以上，共 {short_time(minutes*60)}，占工作的 {minutes/max(1, r['work']):.0%}" if count else "连续 25 分钟以上的工作；试试“开始专注”")
+        put("average", short_time(r["average"]*60) if r["average"] else "—", f"共 {r['runs']} 段工作" if r["runs"] else "")
+        put("switches", f"{r['switches']:.0f} 次 / 小时" if r["switches"] is not None else "—",
+            "每小时换几次程序或网站，越少越专注" if r["switches"] is not None else "记录满半小时后计算")
+        if r["start"] is not None:
+            put("hours", f"{clock(r['start'])} – {clock(r['end'])}", "第一条到最后一条记录" + ("" if single else f"（{r['days']} 天平均）"))
+        else: put("hours", "—", "")
+
+    def refresh_compare(self, now, before, single, count, before_first, before_last):
+        """和上一段比: each category this time against the same length just before."""
+        set_text(self.compare_title, "和前一天比" if single else f"和前 {count} 天比")
+        set_text(self.compare_heads[0], "当天" if single else "这段时间"); set_text(self.compare_heads[1], "前一天" if single else "上一段")
+        has_before = sum(before.values()) > 0
+        for key, (this, then, change) in self.compare_cells.items():
+            if key == "focus":
+                a, b = self.focus_of(now), self.focus_of(before)
+                set_text(this, f"{a:.0%}" if a is not None else "—"); set_text(then, f"{b:.0%}" if b is not None and has_before else "—")
+                diff = (a-b)*100 if a is not None and b is not None and has_before else None
+                good = None if diff is None or abs(diff) < 1 else diff > 0
+                set_text(change, "—" if diff is None else "持平" if abs(diff) < 1 else f"{'↑' if diff > 0 else '↓'} {abs(diff):.0f} 个点")
+            else:
+                set_text(this, short_time(now[key]) if now[key] else "—"); set_text(then, short_time(before[key]) if before[key] else "—")
+                diff = now[key]-before[key] if has_before and (now[key] or before[key]) else None
+                good = None if diff is None or abs(diff) < 60 else {"work": diff > 0, "distraction": diff < 0}.get(key)
+                set_text(change, "—" if diff is None else "持平" if abs(diff) < 60 else f"{'↑' if diff > 0 else '↓'} {short_time(abs(diff))}")
+            restyle(change, f"color:{SUBTLE if good is None else TEXTS['work'] if good else P['danger']};")
+        a, b = before_first, before_last
+        set_text(self.compare_note, (f"上一段：{self.range_name(a.isoformat(), b.isoformat())}。绿色是变好，红色是变差。") if has_before else
+                 "上一段时间没有记录，暂时无法比较。")
+
     def goal_streak(self, goal, force=False):
         """(current, best) goal streak; the sidebar recomputes it at most once a minute."""
         now = datetime.now(); stamp = (now.strftime("%Y-%m-%d %H:%M"), goal)
         if force or self.streak_cache.get("stamp") != stamp:
             today = now.date().isoformat(); first = (now.date()-timedelta(days=400)).isoformat()
-            work = {day: totals["work"] for day, totals in self.store.day_totals(first, today).items()}
-            self.streak_cache = {"stamp": stamp, "value": streaks(work, goal, today), "work": work}
+            totals = self.store.day_totals(first, today)
+            work = {day: t["work"] for day, t in totals.items()}
+            self.streak_cache = {"stamp": stamp, "value": streaks(work, goal, today), "work": work, "totals": totals}
         return self.streak_cache["value"]
 
     def refresh_focus_story(self, today, first_day, last_day):
         """Analysis extras: calendar heatmap, streak, plain-language findings and focus sessions."""
         goal = self.config["work_goal_minutes"]*60; current, best = self.goal_streak(goal, force=True)
-        self.heatmap.set_data(self.streak_cache.get("work", {}), goal, today.isoformat())
+        self.heatmap.include_unknown = self.config["focus_includes_unknown"]
+        self.heatmap.set_data(self.streak_cache.get("totals", {}), goal, today.isoformat(), first_day if first_day == last_day else None)
         rule = f"达到每日目标 {short_time(goal)}" if goal else "工作满 30 分钟"
         set_text(self.streak_label, f"连续 {current} 天{rule} · 最长 {best} 天" if best else f"还没有{rule}的日子")
         findings = insights(self.store, first_day, last_day, self.config["focus_includes_unknown"])
@@ -832,7 +1033,9 @@ class App(Shell):
             colours = {"distraction": TEXTS["distraction"], "rank": TEXTS["distraction"], "flame": TEXTS["work"]}
             html = "".join(f"<p style='margin:0 0 12px'><span style='color:{colours.get(kind, ACCENT)}'>●</span>&nbsp;&nbsp;{line}</p>" for kind, line in findings)
         else:
-            html = f"<span style='color:{MUTED}'>记录满一两天后，这里会总结你最专注的时段、最大的分心来源，以及和上一段时间的对比。</span>"
+            empty = not self.store.day_totals(first_day, last_day)
+            html = f"<span style='color:{MUTED}'>" + (("这一天没有记录。" if first_day == last_day else "这段时间没有记录。") if empty else
+                     "记录满一两天后，这里会总结你最专注的时段、最大的分心来源，以及和上一段时间的对比。") + "</span>"
         set_text(self.insight_label, html)
         rows = list(reversed(self.store.session_list(first_day, last_day)))[:30]
         self.session_table.setRowCount(len(rows))
@@ -869,7 +1072,7 @@ class App(Shell):
         for row in self.store.details(day):
             cat, app, host, seconds = row
             if category and cat != category: continue
-            if query and query not in f"{app} {host} {app_name(app)}".lower(): continue
+            if query and query not in f"{app} {host} {app_name(app)} {site_name(host)}".lower(): continue
             rows.append(row)
         total = sum(self.store.totals(day).values())
         keys = tuple((c, a, h) for c, a, h, _ in rows)
@@ -889,7 +1092,7 @@ class App(Shell):
         self.table.clearSelection(); self.table.setRowCount(len(rows)); self.manager_rows = rows
         selection = self.table.selectionModel()
         for row, (cat, app, host, seconds) in enumerate(rows):
-            values = [CATEGORIES[cat], app_name(app) or "离开 / 锁屏", host or "—", duration(seconds), f"{seconds/total:.1%}" if total else "—"]
+            values = [CATEGORIES[cat], app_name(app) or "离开 / 锁屏", site_name(host) or "—", duration(seconds), f"{seconds/total:.1%}" if total else "—"]
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 if column == 0:
@@ -957,7 +1160,9 @@ class App(Shell):
         row = self.table.currentRow()
         if 0 <= row < len(self.manager_rows) and (self.manager_rows[row][2] or self.manager_rows[row][1].endswith(".exe")):
             _, app, host, _ = self.manager_rows[row]
-            menu.addAction(icon("target", ACCENT, 16), f"设置“{app_name(host or app)}”每日上限…", lambda k=host or app: self.set_app_limit(k))
+            menu.addAction(icon("target", ACCENT, 16), f"设置“{label(app, host)}”每日上限…", lambda k=host or app: self.set_app_limit(k))
+            if app.endswith(".exe"): menu.addAction("给应用改名…", lambda a=app: self.rename_app(a))
+            if host: menu.addAction("给网站改名…", lambda h=host: self.rename_site(h))
         menu.exec(self.table.viewport().mapToGlobal(position))
 
     # ── rules and settings ────────────────────────────────────────────
@@ -1020,26 +1225,40 @@ class App(Shell):
         selected = self.rule_entries[row][0] if 0 <= row < len(getattr(self, "rule_entries", [])) else None
         everything = sorted(entries.items(), key=lambda x: (x[1][1] != "自定义", x[0][0], x[0][1]))
         query = self.rule_search.text().strip().lower(); custom_only = self.custom_only.isChecked(); wanted = self.rule_filter.currentData()
-        self.rule_entries = [e for e in everything if (not custom_only or e[1][1] == "自定义") and (not query or query in e[0][1])
+        self.rule_entries = [e for e in everything if (not custom_only or e[1][1] == "自定义") and (not query or query in e[0][1] or query in key_name(e[0][1]).lower())
                              and (not wanted or e[1][0] == wanted)]
-        self.rules_table.setRowCount(len(self.rule_entries))
+        self.rules_table.setRowCount(len(self.rule_entries)); self.icon_queue = []
         for row, ((kind, key), (category, source)) in enumerate(self.rule_entries):
             limit = self.config["app_limits"].get(key)
-            for col, value in enumerate([LABELS[category], {"host": "网站", "surface": "系统界面"}.get(kind, "应用"), key,
+            shown = site_name(key) if kind == "host" else app_name(key) if kind == "app" else key
+            for col, value in enumerate([LABELS[category], {"host": "网站", "surface": "系统界面"}.get(kind, "应用"),
+                                         f"{shown}（{key}）" if shown != key else key,
                                          f"{limit} 分钟" if limit else "—", source]):
                 item = QTableWidgetItem(value)
                 if col == 0: item.setData(CategoryDelegate.ROLE, category)
-                if col == 2 and kind == "app": item.setIcon(appicons.icon_for(key, category))
+                if col == 2 and kind in ("app", "host"):
+                    # Icons not loaded yet are filled in a few at a time, so the page opens at once.
+                    if appicons.ready(key, category): item.setIcon(appicons.icon_for(key, category))
+                    else: self.icon_queue.append((item, key, category))
                 if col == 4 and source == "默认": item.setForeground(QColor(SUBTLE))
                 if col == 3 and not limit: item.setForeground(QColor(SUBTLE))
-                if col == 2 and kind == "host": item.setIcon(appicons.icon_for(key, category))
                 self.rules_table.setItem(row, col, item)
+        if self.icon_queue: QTimer.singleShot(0, self.fill_icons)
         keys = [key for key, _ in self.rule_entries]
         if selected in keys: self.rules_table.selectRow(keys.index(selected))
         else: self.rules_table.clearSelection(); self.rules_table.setCurrentCell(-1, -1)
         custom = sum(1 for _, (_, source) in everything if source == "自定义")
         shown = f" · 显示 {len(self.rule_entries)} 条" if len(self.rule_entries) != len(everything) else ""
         self.rules_count.setText(f"共 {len(everything)} 条 · 自定义 {custom} 条{shown}")
+
+    def fill_icons(self):
+        """Load one queued program / site icon per event-loop pass, keeping the window responsive."""
+        import shiboken6
+        for _ in range(1):
+            if not self.icon_queue: return
+            item, key, category = self.icon_queue.pop(0)
+            if shiboken6.isValid(item) and item.tableWidget() is not None: item.setIcon(appicons.icon_for(key, category))
+        QTimer.singleShot(15, self.fill_icons)
 
     def rule_menu(self, row, where=None):
         """Change a rule's category in place, from a click on its category cell or a right click."""
@@ -1057,6 +1276,8 @@ class App(Shell):
         menu.addSeparator(); menu.addAction("编辑…", self.edit_rule)
         limit = self.config["app_limits"].get(key)
         menu.addAction(icon("target", ACCENT, 16), f"每日上限…（现在 {limit} 分钟）" if limit else "每日上限…", lambda: self.set_app_limit(key))
+        if kind == "host": menu.addAction("给网站改名…", lambda: self.rename_site(key))
+        elif kind == "app": menu.addAction("给应用改名…", lambda: self.rename_app(key))
         reset = menu.addAction("恢复默认", self.remove_rule); reset.setEnabled(source == "自定义")
         if where is None:
             cell = self.rules_table.visualRect(self.rules_table.model().index(row, 0))
@@ -1074,7 +1295,7 @@ class App(Shell):
         if category == default: rules.pop(key, None)  # same as the built-in rule: no custom entry needed
         else: rules[key] = category
         save_config(self.config_path, self.config); self.refresh_rules()
-        self.notify(f"{key} 以后记为{LABELS[category]}", undo, seconds=6); self.resample_without_charge()
+        self.notify(f"{key_name(key)} 以后记为{LABELS[category]}", undo, seconds=6); self.resample_without_charge()
 
     def rule_undo(self, kind, key):
         """A callable that puts one rule back exactly as it is now."""
@@ -1117,7 +1338,7 @@ class App(Shell):
                   "focus_minutes": self.focus_spin.value(), "own_window": self.own_combo.currentData(),
                   "break_minutes": self.break_spin.value(), "focus_float": self.float_check.isChecked(),
                   "focus_includes_unknown": self.focus_unknown_check.isChecked(), "hour_range": self.hour_range_combo.currentData(),
-                  "export_format": self.export_format_combo.currentData(),
+                  "export_format": self.export_format_combo.currentData(), "overview_away": self.away_combo.currentData(),
                   "export_parts": [key for key, box in self.export_checks.items() if box.isChecked()]}
         if all(self.config[k] == v for k, v in values.items()): return
         if (values["work_goal_minutes"], values["distraction_limit_minutes"]) != (self.config["work_goal_minutes"], self.config["distraction_limit_minutes"]):
@@ -1366,6 +1587,9 @@ class App(Shell):
 
     def export_menu(self):
         menu = popup_menu(self)
+        count, back = self.analysis_span(); first, last = self.analysis_dates()
+        current = f"导出当前：{self.range_name(first, last)}"
+        menu.addAction(icon("report", ACCENT, 16), current, lambda: self.export_range(count, back)); menu.addSeparator()
         for days, back, label in ((1, 0, "导出今天"), (1, 1, "导出昨天"), (3, 0, "导出最近 3 天"), (7, 0, "导出最近 7 天"), (30, 0, "导出最近 30 天")):
             menu.addAction(icon("report", ACCENT, 16), label, lambda d=days, b=back: self.export_range(d, b))
         fmt = {"html": "HTML 报告", "csv": "CSV 表格", "both": "HTML 报告 + CSV 表格"}[self.config["export_format"]]
@@ -1379,7 +1603,7 @@ class App(Shell):
         parts = self.config["export_parts"]
         if not parts:
             self.notify("请先在“规则与设置 → 分析与导出”里至少勾选一项导出内容。"); return
-        if not count: count, back = self.range_combo.currentData()
+        if not count: count, back = self.analysis_span()
         last = datetime.now().date()-timedelta(days=back); first = last-timedelta(days=count-1)
         span = last.isoformat() if count == 1 else f"{first.isoformat()}_{last.isoformat()}"
         base = self.project/"exports"; base.mkdir(exist_ok=True)

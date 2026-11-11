@@ -21,7 +21,7 @@ import theme
 from charts import Donut, Heatmap, StackedBars, RankList, Timeline
 
 PAGES = [("今日总览", "overview", "今天的专注", "实时记录今天的投入、分心与离开。"),
-         ("时间分析", "chart", "时间分析", "按天查看趋势；悬停读数，点击某天查看明细。"),
+         ("时间分析", "chart", "时间分析", "选一段时间看投入、分心和节奏；点日历或柱子分析某一天。"),
          ("活动管理", "list", "活动管理", "筛选记录、批量改分类，让统计符合实际。"),
          ("规则与设置", "settings", "规则与设置", "决定以后怎样记录，以及多久提醒一次。"),
          ("浏览器连接", "browser", "浏览器连接", "连接扩展后按网站域名识别，提醒更准确。")]
@@ -198,6 +198,12 @@ class Segmented(QFrame):
         if 0 <= index < len(self.items) and index != self.currentIndex():
             self.group.button(index).setChecked(True); self.currentIndexChanged.emit(index)
 
+    def clearSelection(self):
+        """No segment chosen (e.g. a single day picked elsewhere); clicking any segment chooses it again."""
+        checked = self.group.checkedButton()
+        if checked:
+            self.group.setExclusive(False); checked.setChecked(False); self.group.setExclusive(True)
+
 
 class Toast(QFrame):
     """Floating message at the bottom of the window, optionally with one action (e.g. 撤销)."""
@@ -269,12 +275,12 @@ class StatCard(QFrame):
     def __init__(self, key, title):
         super().__init__(); self.setObjectName("stat"); self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setToolTip(f"查看今天的{title}明细")
-        layout = QVBoxLayout(self); layout.setContentsMargins(18, 12, 18, 12); layout.setSpacing(2)
+        layout = QVBoxLayout(self); layout.setContentsMargins(16, 12, 16, 12); layout.setSpacing(2)
         top = QHBoxLayout(); top.setSpacing(8)
         chip = QFrame(); chip.setFixedSize(26, 26); chip.setStyleSheet(f"background:{TINTS[key]};border-radius:8px;")
         inner = QHBoxLayout(chip); inner.setContentsMargins(5, 5, 5, 5); inner.addWidget(IconLabel(icon(key, COLORS[key], 16), 16))
         top.addWidget(chip); top.addWidget(text(title, "muted")); top.addStretch()
-        self.share = text("—", "small"); top.addWidget(self.share); layout.addLayout(top)
+        self.share = text("—", "pill"); self.key = key; top.addWidget(self.share); layout.addLayout(top)
         self.value = text("00:00:00", "value"); layout.addWidget(self.value)
         self.delta = text("", "small"); layout.addWidget(self.delta)
         self.bar = Meter(COLORS[key], 4); layout.addSpacing(4); layout.addWidget(self.bar)
@@ -291,6 +297,8 @@ def kpi(title, parent_layout, kind="chart"):
     inner = QHBoxLayout(chip); inner.setContentsMargins(4, 4, 4, 4); inner.addWidget(IconLabel(icon(kind, ACCENT, 14), 14))
     top.addWidget(chip); top.addWidget(text(title, "small")); top.addStretch()
     inside.addLayout(top); value = text("—", "kpi"); inside.addWidget(value)
+    value.sub = text("", "muted")  # kept short; it never widens its tile, so the five tiles stay equal
+    value.sub.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred); inside.addWidget(value.sub)
     parent_layout.addWidget(frame, 1)
     return value
 
@@ -329,7 +337,7 @@ class Shell(QMainWindow):
         canvas = QWidget(); canvas.setObjectName("canvas"); self.setCentralWidget(canvas)
         columns = QHBoxLayout(canvas); columns.setContentsMargins(0, 0, 0, 0); columns.setSpacing(0)
         columns.addWidget(self.build_sidebar())
-        right = QWidget(); region = QVBoxLayout(right); region.setContentsMargins(28, 22, 24, 12); region.setSpacing(16)
+        right = QWidget(); region = QVBoxLayout(right); region.setContentsMargins(28, 22, 24, 20); region.setSpacing(16)
         header = QHBoxLayout(); titles = QVBoxLayout(); titles.setSpacing(3)
         self.page_title = text("", "title"); self.page_subtitle = text("", "muted")
         titles.addWidget(self.page_title); titles.addWidget(self.page_subtitle); header.addLayout(titles); header.addStretch()
@@ -340,10 +348,6 @@ class Shell(QMainWindow):
         header.addWidget(self.pause_button); region.addLayout(header)
         self.pages = QStackedWidget(); region.addWidget(self.pages, 1)
         self.build_overview(); self.build_analysis(); self.build_manager(); self.build_settings(); self.build_browser()
-        foot = QHBoxLayout()
-        self.status = text("", "small"); foot.addWidget(self.status, 1)
-        self.footer = text("关闭窗口后在托盘继续记录 · Ctrl+1–5 切换页面 · Ctrl+Shift+F 专注 · Ctrl+P 暂停 · Ctrl+F 搜索", "small"); foot.addWidget(self.footer)
-        region.addLayout(foot)
         columns.addWidget(right, 1)
         self.toast = Toast(canvas)
         self.navigate(0)
@@ -435,89 +439,188 @@ class Shell(QMainWindow):
         rhythm, rl = card()
         head = heading("今天的时间节奏", "timeline"); head.addSpacing(10)
         self.rhythm_mode = Segmented([("按小时", "hour"), ("时间线", "line")]); head.addWidget(self.rhythm_mode)
-        head.addStretch(); head.addLayout(legend()); rl.addLayout(head)
+        head.addStretch(); rl.addLayout(head)
         self.rhythm_stack = QStackedWidget()
         self.hour_chart = StackedBars(hourly=True); self.rhythm_stack.addWidget(self.hour_chart)
         self.timeline = Timeline(); self.timeline.chosen.connect(lambda query: self.open_manager(query=query)); self.rhythm_stack.addWidget(self.timeline)
         self.rhythm_mode.currentIndexChanged.connect(self.switch_rhythm)
         rl.addWidget(self.rhythm_stack, 1)
-        self.hour_note = text("", "small"); rl.addWidget(self.hour_note)
-        bottom.addWidget(rhythm, 7)
+        foot = legend(); foot.addStretch()
+        self.hour_note = text("", "small"); foot.addWidget(self.hour_note); rl.addLayout(foot)
+        bottom.addWidget(rhythm, 3)
         side = QVBoxLayout(); side.setSpacing(12)
-        spread, sl = card("时间分布", margins=(20, 16, 20, 16), spacing=8, kind="pie")
-        ring = QHBoxLayout(); ring.setSpacing(16)
-        self.donut = Donut(); self.donut.chosen.connect(lambda key: self.open_manager(category=key)); ring.addWidget(self.donut)
-        rows = QVBoxLayout(); rows.setSpacing(6); rows.addStretch(); self.legend_values = {}
+        spread, sl = card(margins=(20, 16, 20, 16), spacing=8)
+        head = heading("时间分布", "pie"); head.addStretch()
+        # A quiet switch: the same choice lives in 设置 → 分析与导出.
+        self.away_toggle = button("含离开", self.toggle_away, role="quiet")
+        self.away_toggle.setToolTip("点击切换：占比、环形图和每小时柱子是否计入离开时间（设置里也能改）")
+        head.addWidget(self.away_toggle); sl.addLayout(head)
+        ring = QHBoxLayout(); ring.setSpacing(12)
+        self.donut = Donut(136); self.donut.chosen.connect(lambda key: self.open_manager(category=key)); ring.addWidget(self.donut)
+        rows = QVBoxLayout(); rows.setSpacing(7); rows.addStretch(); self.legend_values = {}; self.legend_times = {}
         for key, title in CATEGORIES.items():
-            line = QHBoxLayout()
-            dot = text("●  "+title); dot.setStyleSheet(f"color:{TEXTS[key]};font-size:13px;"); line.addWidget(dot); line.addStretch()
-            value = text("—", "muted"); self.legend_values[key] = value; line.addWidget(value); rows.addLayout(line)
+            line = QHBoxLayout(); line.setSpacing(8)
+            dot = text("● "+title); dot.setStyleSheet(f"color:{TEXTS[key]};font-size:14px;"); line.addWidget(dot); line.addStretch()
+            spent = text("", "muted"); spent.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter); spent.setMinimumWidth(1)  # gives way first in a narrow window
+            self.legend_times[key] = spent; line.addWidget(spent)
+            value = text("—"); value.setFont(font(13, QFont.Weight.DemiBold, "num")); value.setMinimumWidth(38)
+            value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.legend_values[key] = value; line.addWidget(value); rows.addLayout(line)
         rows.addStretch(); ring.addLayout(rows, 1); sl.addLayout(ring)
         side.addWidget(spread)
         ranking, kl = card()
         head = heading("主要活动", "rank"); head.addStretch()
         head.addWidget(button("全部 →", lambda: self.open_manager(), role="link")); kl.addLayout(head)
-        self.rank_list = RankList(6); self.rank_list.chosen.connect(lambda query: self.open_manager(query=query)); kl.addWidget(self.rank_list, 1)
+        self.rank_list = RankList(6, row=40, least=4); self.rank_list.chosen.connect(lambda query: self.open_manager(query=query)); kl.addWidget(self.rank_list, 1)
         side.addWidget(ranking, 1)
-        bottom.addLayout(side, 4)
+        bottom.addLayout(side, 2)
         layout.addLayout(bottom, 1)
         self.pages.addWidget(view)
 
     def build_analysis(self):
-        view, layout = page()
+        view, layout = page(); self.analysis_view = view
+        panel, inside = card()
+        head = heading("专注日历", "calendar"); head.addSpacing(6); head.addWidget(text("点任意一天单独分析", "small")); head.addStretch(); self.streak_label = text("", "muted"); head.addWidget(self.streak_label)
+        inside.addLayout(head)
+        self.heatmap = Heatmap(); self.heatmap.chosen.connect(self.show_analysis_day); inside.addWidget(self.heatmap)
+        layout.addWidget(panel)
+
         controls = QHBoxLayout(); controls.setSpacing(10)
         # (number of days, days back from today to the last one): 昨天 ends yesterday, the rest end today.
-        self.range_combo = Segmented([("昨天", (1, 1)), ("最近 3 天", (3, 0)), ("最近 7 天", (7, 0)), ("最近 30 天", (30, 0))])
-        self.range_combo.setCurrentIndex(2)
-        self.range_combo.currentIndexChanged.connect(lambda _: self.refresh_analysis()); controls.addWidget(self.range_combo)
+        self.range_combo = Segmented([("今天", (1, 0)), ("昨天", (1, 1)), ("最近 3 天", (3, 0)), ("最近 7 天", (7, 0)), ("最近 30 天", (30, 0))])
+        self.range_combo.setCurrentIndex(3)
+        self.range_combo.currentIndexChanged.connect(lambda _: self.choose_range()); controls.addWidget(self.range_combo)
+        # One day picked from the calendar, a bar or the daily table: ‹ 11月3日 周二 ›
+        self.day_box = QFrame(); self.day_box.setObjectName("segmented")
+        row = QHBoxLayout(self.day_box); row.setContentsMargins(3, 3, 3, 3); row.setSpacing(2)
+        self.day_prev = QPushButton(); self.day_next = QPushButton(); self.day_label = QPushButton()
+        for b, kind in ((self.day_prev, "left"), (self.day_label, None), (self.day_next, "right")):
+            b.setProperty("role", "segment"); b.setCursor(Qt.CursorShape.PointingHandCursor)
+            if kind: b.setIcon(icon(kind, MUTED, 14)); b.setIconSize(QSize(14, 14))
+            row.addWidget(b)
+        self.day_label.setCheckable(True); self.day_label.setChecked(True); self.day_label.setToolTip("正在分析这一天；点左右箭头换一天")
+        self.day_prev.setToolTip("前一天"); self.day_next.setToolTip("后一天")
+        self.day_prev.clicked.connect(lambda: self.shift_analysis_day(-1)); self.day_next.clicked.connect(lambda: self.shift_analysis_day(1))
+        self.day_label.clicked.connect(lambda: self.day_label.setChecked(True))
+        self.day_box.hide(); controls.addWidget(self.day_box)
+        self.range_note = text("", "muted"); controls.addSpacing(4); controls.addWidget(self.range_note)
         controls.addStretch()
+        self.day_detail = button("查看当天活动", lambda: self.open_manager(day=self.analysis_day), kind="list")
+        self.day_detail.setToolTip("在活动管理里查看、修改这一天的每条记录"); self.day_detail.hide(); controls.addWidget(self.day_detail)
         self.export_button = button("导出分析报告", self.export_menu, True, kind="report")
-        self.export_button.setToolTip("选择导出今天、最近 7 天或最近 30 天；格式和内容在“规则与设置 → 分析与导出”里设置")
+        self.export_button.setToolTip("导出当前范围，或今天、最近 7 天、最近 30 天；格式和内容在“规则与设置 → 分析与导出”里设置")
         controls.addWidget(self.export_button)
         layout.addLayout(controls)
+
         tiles = QHBoxLayout(); tiles.setSpacing(12)
-        self.kpis = {"work": kpi("工作合计", tiles, "work"), "average": kpi("有记录日平均工作", tiles, "calendar"),
-                     "distraction": kpi("摸鱼合计", tiles, "distraction"), "focus": kpi("专注率", tiles, "target"),
+        self.kpis = {"work": kpi("工作", tiles, "work"), "distraction": kpi("摸鱼", tiles, "distraction"),
+                     "focus": kpi("专注率", tiles, "target"), "present": kpi("在电脑前", tiles, "monitor"),
                      "sessions": kpi("完成专注", tiles, "flame")}
-        self.kpis["focus"].parentWidget().setToolTip("工作 ÷（工作 + 摸鱼 + 待分类），可在设置里改为不含待分类")
+        self.kpis["focus"].parentWidget().setToolTip("工作 ÷（工作 + 摸鱼 + 待分类），可在设置里改为不含待分类；系统工具和离开不算")
+        for key in ("work", "distraction"): self.kpis[key].parentWidget().setToolTip("日均按有记录的日子计算，没开程序的日子不算")
+        self.kpis["present"].parentWidget().setToolTip("工作、摸鱼、系统工具和待分类的合计，即除离开以外记录到的时间")
         layout.addLayout(tiles)
+
+        # 时间构成 | 和上一段比
         pair = QHBoxLayout(); pair.setSpacing(12)
-        panel, inside = card()
-        head = heading("专注日历", "calendar"); head.addStretch(); self.streak_label = text("", "muted"); head.addWidget(self.streak_label)
-        inside.addLayout(head)
-        self.heatmap = Heatmap(); self.heatmap.chosen.connect(lambda day: self.open_manager(day=day)); inside.addWidget(self.heatmap)
-        pair.addWidget(panel, 3)
-        panel, inside = card("要点", kind="bulb")
-        self.insight_label = QLabel(); self.insight_label.setWordWrap(True); self.insight_label.setTextFormat(Qt.TextFormat.RichText)
-        self.insight_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft); self.insight_label.setObjectName("insights")
-        inside.addWidget(self.insight_label, 1)
-        pair.addWidget(panel, 2); layout.addLayout(pair)
-        panel, inside = card()
+        panel, inside = card(margins=(20, 16, 20, 16), spacing=8)
+        head = heading("时间构成", "pie"); head.addStretch(); self.mix_note = text("", "small"); head.addWidget(self.mix_note); inside.addLayout(head)
+        ring = QHBoxLayout(); ring.setSpacing(20)
+        self.mix_donut = Donut(150); self.mix_donut.chosen.connect(self.mix_chosen); ring.addWidget(self.mix_donut, 0, Qt.AlignmentFlag.AlignVCenter)
+        # Legend as a table: name | share bar | time | percent — the bar uses the width that was empty.
+        rows = QGridLayout(); rows.setHorizontalSpacing(12); rows.setVerticalSpacing(10)
+        self.mix_values = {}; self.mix_times = {}; self.mix_bars = {}
+        for index, (key, title) in enumerate(CATEGORIES.items()):
+            dot = text("● "+title); dot.setStyleSheet(f"color:{TEXTS[key]};font-size:14px;"); rows.addWidget(dot, index, 0)
+            bar = Meter(COLORS[key], 6); bar.setMinimumWidth(24); self.mix_bars[key] = bar
+            rows.addWidget(bar, index, 1, Qt.AlignmentFlag.AlignVCenter)
+            spent = text("", "muted"); spent.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.mix_times[key] = spent; rows.addWidget(spent, index, 2)
+            value = text("—"); value.setFont(font(13, QFont.Weight.DemiBold, "num")); value.setMinimumWidth(44)
+            value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.mix_values[key] = value; rows.addWidget(value, index, 3)
+        rows.setColumnStretch(1, 1); ring.addLayout(rows, 1); inside.addStretch(); inside.addLayout(ring); inside.addStretch()
+        pair.addWidget(panel, 1)
+        panel, inside = card(margins=(20, 16, 20, 16), spacing=8)
+        head = heading("", "timeline"); self.compare_title = head.itemAt(head.count()-1).widget(); head.addStretch(); inside.addLayout(head)
+        grid = QGridLayout(); grid.setHorizontalSpacing(16); grid.setVerticalSpacing(9); self.compare_cells = {}
+        self.compare_heads = []
+        for col, title in enumerate(["", "这段时间", "上一段", "变化"]):
+            if title:
+                head_label = text(title, "muted"); head_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter); grid.addWidget(head_label, 0, col)
+                self.compare_heads.append(head_label)
+        for index, (key, title) in enumerate([*CATEGORIES.items(), ("focus", "专注率")], 1):
+            name = text(("● " if key in CATEGORIES else "")+title); name.setStyleSheet(f"color:{TEXTS[key] if key in CATEGORIES else INK};font-size:14px;")
+            grid.addWidget(name, index, 0); cells = []
+            for col in (1, 2, 3):
+                cell = text("—", None if col != 2 else "muted"); cell.setFont(font(13, QFont.Weight.DemiBold if col == 1 else QFont.Weight.Normal, "num"))
+                cell.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter); grid.addWidget(cell, index, col); cells.append(cell)
+            self.compare_cells[key] = cells
+        # Spread the three number columns evenly instead of packing them against the right edge.
+        grid.setColumnStretch(0, 3)
+        for col in (1, 2, 3): grid.setColumnStretch(col, 2); grid.setColumnMinimumWidth(col, 72)
+        inside.addLayout(grid)
+        self.compare_note = text("", "small", wrap=True); inside.addWidget(self.compare_note); inside.addStretch()
+        pair.addWidget(panel, 1); layout.addLayout(pair)
+
+        self.trend_card, inside = card()
         head = heading("每日时间", "chart"); head.addStretch(); head.addLayout(legend()); inside.addLayout(head)
-        self.trend_chart = StackedBars(); self.trend_chart.setMinimumHeight(260); self.trend_chart.chosen.connect(lambda day: self.open_manager(day=day)); inside.addWidget(self.trend_chart)
-        inside.addWidget(text("柱高是已记录的时长，不是开机时长；空白表示当天没有记录。点击柱子查看当天明细。", "small")); layout.addWidget(panel)
+        self.trend_chart = StackedBars(); self.trend_chart.setMinimumHeight(240); self.trend_chart.chosen.connect(self.show_analysis_day); inside.addWidget(self.trend_chart)
+        inside.addWidget(text("柱高是已记录的时长，不是开机时长；空白表示当天没有记录。点击柱子分析那一天。", "small")); layout.addWidget(self.trend_card)
+
         pair = QHBoxLayout(); pair.setSpacing(12)
         panel, inside = card("应用与网站排行", kind="rank")
-        self.range_rank = RankList(8); self.range_rank.setMinimumHeight(RankList.ROW*8)
-        self.range_rank.chosen.connect(lambda query: self.open_manager(query=query)); inside.addWidget(self.range_rank, 1)
+        self.range_rank = RankList(8); self.range_rank.setMinimumHeight(RankList.ROW*5)
+        self.range_rank.chosen.connect(lambda query: self.open_manager(day=self.analysis_last, query=query)); inside.addWidget(self.range_rank, 1)
         pair.addWidget(panel, 1)
-        panel, inside = card("一天中的时段分布", kind="clock")
+        panel, inside = card()
+        head = heading("", "clock"); self.profile_title = head.itemAt(head.count()-1).widget(); head.addStretch(); inside.addLayout(head)
         self.profile_chart = StackedBars(hourly=True); self.profile_chart.setMinimumHeight(250); inside.addWidget(self.profile_chart, 1)
         self.profile_note = text("", "small"); inside.addWidget(self.profile_note)
         pair.addWidget(panel, 1); layout.addLayout(pair)
+
+        # 工作节奏: one row of five figures
+        panel, inside = card()
+        head = heading("工作节奏", "focus"); head.addStretch()
+        head.addWidget(text("按分钟记录统计；中间离开不超过 2 分钟仍算同一段", "small")); inside.addLayout(head)
+        self.rhythm_rows = self.stat_columns(inside, [("longest", "最长连续工作"), ("deep", "深度工作段"), ("average", "平均每段工作"),
+                                                     ("switches", "切换频率"), ("hours", "开始与结束")])
+        layout.addWidget(panel)
+
         panel, inside = card("专注记录", kind="flame")
         self.session_table = table(["开始", "任务", "实际 / 计划", "工作 / 摸鱼", "结果"], [140, 0, 130, 220, 90])
         self.session_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self.session_table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff); inside.addWidget(self.session_table)
         self.session_empty = text("这段时间还没有专注记录。点右上角“开始专注”，可以给这一段写上任务名。", "muted", wrap=True)
         inside.addWidget(self.session_empty); layout.addWidget(panel)
-        panel, inside = card("每日汇总", kind="calendar")
+        self.history_card, inside = card("每日汇总", kind="list")
         self.history_table = table(["日期", *CATEGORIES.values(), "专注率"])
         self.history_table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.history_table.setToolTip("双击某天查看活动明细")
-        self.history_table.cellDoubleClicked.connect(lambda row, _: self.open_manager(day=self.history_table.item(row, 0).data(Qt.ItemDataRole.UserRole)))
-        inside.addWidget(self.history_table); layout.addWidget(panel)
+        self.history_table.setToolTip("双击某天分析那一天")
+        self.history_table.cellDoubleClicked.connect(lambda row, _: self.show_analysis_day(self.history_table.item(row, 0).data(Qt.ItemDataRole.UserRole)))
+        inside.addWidget(self.history_table); layout.addWidget(self.history_card)
+
+        # 要点: plain-language extras, last on the page
+        panel, inside = card("要点", kind="bulb")
+        self.insight_label = QLabel(); self.insight_label.setWordWrap(True); self.insight_label.setTextFormat(Qt.TextFormat.RichText)
+        self.insight_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft); self.insight_label.setObjectName("insights")
+        inside.addWidget(self.insight_label)
+        layout.addWidget(panel)
         self.pages.addWidget(view)
+
+    def stat_columns(self, inside, items):
+        """A row of figures: label, big value, a short wrapped note; returns {key: (value, note)}."""
+        row = QHBoxLayout(); row.setSpacing(0); cells = {}
+        for index, (key, title) in enumerate(items):
+            if index:
+                rule = QFrame(); rule.setFixedWidth(1); rule.setStyleSheet(f"background:{P['line']};"); row.addWidget(rule)
+            box = QVBoxLayout(); box.setSpacing(4); box.setContentsMargins(0 if not index else 16, 2, 12, 2)
+            box.addWidget(text(title, "muted"))
+            value = text("—"); value.setFont(font(18, QFont.Weight.DemiBold, "num")); value.setStyleSheet("font-size:18px;"); box.addWidget(value)
+            note = text("", "small", wrap=True); note.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft); box.addWidget(note); box.addStretch()
+            row.addLayout(box, 1); cells[key] = (value, note)
+        inside.addLayout(row)
+        return cells
 
     def build_manager(self):
         view, layout = page(scroll=False)
@@ -557,7 +660,7 @@ class Shell(QMainWindow):
         self.undo_button = button("撤销", self.undo_correction, kind="undo")
         self.undo_button.setToolTip("撤销上次记录修正（Ctrl+Z），修改后新增的时间保留；规则不会被撤销。"); actions.addWidget(self.undo_button)
         inside.addLayout(actions)
-        self.table = table(["分类", "应用", "网站域名", "累计时长", "占当日"], [110, 0, 0, 110, 90])
+        self.table = table(["分类", "应用", "网站", "累计时长", "占当日"], [110, 0, 0, 110, 90])
         self.table.setToolTip("Ctrl / Shift 多选；右键可批量设置；双击调整以后的分类规则。离开时间也能改，改后记为“离开期间（补记）”。")
         self.table.itemSelectionChanged.connect(self.selection_changed)
         self.table.cellDoubleClicked.connect(lambda row, _: self.rule_for_row(row))
@@ -666,11 +769,20 @@ class Shell(QMainWindow):
         data_row.addWidget(button("备份数据…", self.backup_data, kind="export")); data_row.addWidget(button("打开数据文件夹", self.open_data_folder, kind="folder"))
         data_box = QWidget(); data_box.setLayout(data_row); data_row.setContentsMargins(0, 0, 0, 0)
         data_box.setToolTip("备份是一份完整的记录数据库，换电脑或重装后可以交给本程序恢复")
-        self.form_rows(inside, [("专注率", self.focus_unknown_check, ""), ("小时图范围", self.hour_range_combo, ""),
+        self.away_combo = QComboBox(); self.away_combo.setFixedWidth(200)
+        self.away_combo.addItem("计入离开时间", True); self.away_combo.addItem("只算在电脑前的时间", False)
+        self.away_combo.setCurrentIndex(0 if c["overview_away"] else 1)
+        self.away_combo.setToolTip("今日总览的五项占比、环形图和每小时柱子是否计入离开时间；记录本身不变")
+        self.away_combo.currentIndexChanged.connect(self.schedule_preferences)
+        self.form_rows(inside, [("专注率", self.focus_unknown_check, ""), ("总览占比", self.away_combo, ""), ("小时图范围", self.hour_range_combo, ""),
                                 ("导出格式", self.export_format_combo, ""), ("导出内容", holder, ""), ("数据", data_box, "")])
         inside.addStretch(); cards.addWidget(panel, 1)
         layout.addLayout(cards)
-        layout.addWidget(text("所有设置修改后自动保存。", "small"))
+        tips = QFrame(); tips.setObjectName("note"); tip_row = QHBoxLayout(tips); tip_row.setContentsMargins(14, 10, 14, 10); tip_row.setSpacing(10)
+        tip_row.addWidget(IconLabel(icon("bulb", ACCENT, 16), 16))
+        tip_row.addWidget(text("所有设置修改后自动保存；关闭窗口后在托盘继续记录。快捷键：Ctrl+1–5 切换页面 · Ctrl+Shift+F 专注 · "
+                               "Ctrl+P 暂停 · Ctrl+F 搜索", "small", wrap=True), 1)
+        layout.addWidget(tips)
         panel, inside = card()
         head = heading("分类规则", "rules"); self.rules_count = text("", "small"); head.addWidget(self.rules_count); head.addStretch()
         head.addWidget(button("添加规则", self.add_rule, True)); head.addWidget(button("编辑所选", self.edit_rule))
@@ -678,12 +790,12 @@ class Shell(QMainWindow):
         filters = QHBoxLayout(); filters.setSpacing(10)
         self.rule_filter = Segmented([("全部", "")]+[(LABELS[key], key) for key in RULE_TARGETS])
         self.rule_filter.currentIndexChanged.connect(lambda _: self.refresh_rules()); filters.addWidget(self.rule_filter)
-        self.rule_search = QLineEdit(); self.rule_search.setPlaceholderText("搜索应用或域名"); self.rule_search.setClearButtonEnabled(True)
+        self.rule_search = QLineEdit(); self.rule_search.setPlaceholderText("搜索应用、网站名或域名"); self.rule_search.setClearButtonEnabled(True)
         self.rule_search.textChanged.connect(lambda _: self.refresh_rules()); filters.addWidget(self.rule_search, 1)
         self.custom_only = QCheckBox("只看自定义"); self.custom_only.toggled.connect(lambda _: self.refresh_rules()); filters.addWidget(self.custom_only)
         inside.addLayout(filters)
         inside.addWidget(text("网站规则优先于浏览器应用规则，更具体的子域名优先；没装扩展时，对抖音 / 小红书 / B站的网站规则同样生效。", "small", wrap=True))
-        self.rules_table = table(["分类", "类型", "应用 / 域名", "每日上限", "来源"], [110, 80, 0, 96, 90])
+        self.rules_table = table(["分类", "类型", "应用 / 网站", "每日上限", "来源"], [110, 80, 0, 96, 90])
         self.rules_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.rules_table.setToolTip("点分类可直接改；右键有更多操作；双击编辑。")
         self.rules_table.setItemDelegateForColumn(0, CategoryDelegate(self.rules_table, chevron=True))

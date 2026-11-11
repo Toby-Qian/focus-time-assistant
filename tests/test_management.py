@@ -193,6 +193,20 @@ class ManagementTests(unittest.TestCase):
         self.assertIn("多",text); self.assertIn("「论文」",text)
         self.assertEqual(insights(self.store,"2020-01-01","2020-01-07"),[])
 
+    def test_work_rhythm_finds_stretches_and_switches(self):
+        from insights import work_rhythm
+        day=datetime(2026,11,10,9,0)
+        self.store.add(day,day+timedelta(minutes=30),Activity("work","code.exe"))
+        self.store.add(day+timedelta(minutes=30),day+timedelta(minutes=32),Activity("distraction","chrome.exe","www.bilibili.com"))  # short look away
+        self.store.add(day+timedelta(minutes=32),day+timedelta(minutes=42),Activity("work","winword.exe"))
+        self.store.add(day+timedelta(hours=2),day+timedelta(hours=2,minutes=10),Activity("work","code.exe"))
+        r=work_rhythm(self.store,"2026-11-10","2026-11-10")
+        self.assertEqual(r["longest"][0],40); self.assertEqual(r["longest"][2],9*60)  # 30 + 10 across a 2-minute gap
+        self.assertEqual(r["deep"],(1,40)); self.assertEqual(r["runs"],2)
+        self.assertEqual((r["start"],r["end"]),(9*60,11*60+10))
+        self.assertGreater(r["switches"],0)
+        self.assertIsNone(work_rhythm(self.store,"2020-01-01","2020-01-02")["longest"])
+
     def test_same_time_yesterday_uses_minute_records_only(self):
         self.add("work",90)  # 12:59:30 – 13:01:00
         self.assertEqual(self.store.totals_until(self.day,"13:00")["work"],30)

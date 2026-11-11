@@ -108,7 +108,60 @@ APP_NAMES = {"codex.exe": "Codex", "chatgpt.exe": "Codex / ChatGPT", "claude.exe
              "firefox.exe": "Firefox", "windowsterminal.exe": "Windows Terminal", "pythonw.exe": "Python", "matlab.exe": "MATLAB", "wechat.exe": "微信", "weixin.exe": "微信", "qq.exe": "QQ"}
 
 
+# Display names for common websites; a domain also covers its subdomains (the longest match wins).
+SITE_NAMES = {"douyin.com": "抖音", "iesdouyin.com": "抖音", "xiaohongshu.com": "小红书", "xhslink.com": "小红书",
+              "bilibili.com": "B站", "b23.tv": "B站", "kuaishou.com": "快手", "ixigua.com": "西瓜视频",
+              "weibo.com": "微博", "zhihu.com": "知乎", "douban.com": "豆瓣", "tieba.baidu.com": "百度贴吧",
+              "baidu.com": "百度", "qq.com": "腾讯", "v.qq.com": "腾讯视频", "mail.qq.com": "QQ 邮箱", "iqiyi.com": "爱奇艺", "youku.com": "优酷",
+              "taobao.com": "淘宝", "tmall.com": "天猫", "jd.com": "京东", "pinduoduo.com": "拼多多", "csdn.net": "CSDN",
+              "cnki.net": "中国知网", "github.com": "GitHub", "gitee.com": "Gitee", "stackoverflow.com": "Stack Overflow",
+              "google.com": "Google", "scholar.google.com": "Google 学术", "mail.google.com": "Gmail", "youtube.com": "YouTube",
+              "chatgpt.com": "ChatGPT", "openai.com": "OpenAI", "claude.ai": "Claude", "deepseek.com": "DeepSeek", "kimi.com": "Kimi",
+              "doubao.com": "豆包", "notion.so": "Notion", "feishu.cn": "飞书", "yuque.com": "语雀", "wikipedia.org": "维基百科",
+              "x.com": "X", "twitter.com": "X", "reddit.com": "Reddit", "sciencedirect.com": "ScienceDirect",
+              "springer.com": "Springer", "nature.com": "Nature", "ieee.org": "IEEE", "overleaf.com": "Overleaf", "arxiv.org": "arXiv",
+              "researchgate.net": "ResearchGate", "webofscience.com": "Web of Science", "wiley.com": "Wiley", "acs.org": "ACS",
+              "translate.google.com": "Google 翻译", "fanyi.baidu.com": "百度翻译", "deepl.com": "DeepL", "chaoxing.com": "超星学习通",
+              "icourse163.org": "中国大学 MOOC", "163.com": "网易", "music.163.com": "网易云音乐", "huya.com": "虎牙直播", "douyu.com": "斗鱼直播"}
+SITE_ALIASES = {}  # the user's own names, set from settings ("site_names"); they win over SITE_NAMES
+
+
+def _site_lookup(host, names):
+    host = host.lower()
+    match = max((d for d in names if host == d or host.endswith("."+d)), key=len, default=None)
+    return names[match] if match else ""
+
+
+def site_name(host):
+    """The website's name for a domain: the user's own name, then a known one, else the domain."""
+    if not host: return ""
+    return _site_lookup(host, SITE_ALIASES) or _site_lookup(host, SITE_NAMES) or host
+
+
+def site_default(host):
+    return _site_lookup(host, SITE_NAMES) if host else ""
+
+
+def key_name(key):
+    """Name for a rule / limit key: a program (".exe"), a system surface or a website domain."""
+    if key.endswith(".exe") or key.startswith("界面:") or "." not in key: return app_name(key)
+    return site_name(key)
+
+
+def label(app, host):
+    """One row's display name: the website if there is one, else the program."""
+    return site_name(host) if host else app_name(app)
+
+
+APP_ALIASES = {}  # the user's own program names, set from settings ("app_names")
+
+
 def app_name(app):
+    return APP_ALIASES.get(app) or app_default(app)
+
+
+def app_default(app):
+    """The program's name without the user's own: built-in, then the file's description."""
     if app.startswith("界面:"):  # counted desktop / taskbar … time
         return app[3:]+"（系统界面）"
     if app in APP_NAMES:
@@ -166,6 +219,8 @@ QPushButton[role='primary'] {{ background:{p['accent']}; color:{p['on_accent']};
 QPushButton[role='primary']:hover {{ background:{p['accent_hover']}; border-color:{p['accent_hover']}; }}
 QPushButton[role='primary'][kbfocus='true'] {{ border:2px solid {p['ink']}; padding:6px 13px; }}
 QPushButton[role='primary']:disabled {{ color:{p['disabled_text']}; background:{p['disabled_bg']}; border-color:{p['disabled_line']}; }}
+QPushButton[role='quiet'] {{ border:0; background:transparent; padding:3px 8px; border-radius:6px; color:{p['subtle']}; font-size:12px; }}
+QPushButton[role='quiet']:hover {{ background:{p['note_hover']}; color:{p['muted']}; }}
 QPushButton[role='link'] {{ border:0; background:transparent; padding:2px 0; color:{p['accent']}; }}
 QPushButton[role='nav'] {{ text-align:left; padding:10px 14px; border:0; border-radius:8px; background:transparent; color:{p['nav']}; }}
 QPushButton[role='nav']:hover {{ background:{p['row_hover']}; color:{p['strong']}; }}
