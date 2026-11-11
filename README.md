@@ -72,3 +72,7 @@ python -m venv .venv
 源码在 `app/`：`windows.py` 读取前台窗口和空闲时间，`core.py` 负责分类与 SQLite 记录，`desktop.py` 是采样和界面逻辑，`ui_qt.py` / `charts.py` / `theme.py` 是 Qt 界面、图表和主题，`bridge.py` 是给浏览器扩展用的本机接口。
 
 这是一个对行为的估计工具：它只能看到你在用哪个窗口，不能判断你是否真的在专注，分类可以随时手动修正。
+
+## 许可证
+
+[MIT](LICENSE)
