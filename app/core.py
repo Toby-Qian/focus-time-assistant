@@ -25,7 +25,8 @@ SURFACES = ("桌面", "任务栏", "托盘区", "任务栏预览", "任务切换
             "已最小化", "隐藏窗口", "其他桌面", "锁屏", "无前台窗口")
 SURFACE_TARGETS = ("work", "distraction", "system", "idle", "unknown", IGNORE)
 SURFACE_PREFIX = "界面:"
-AWAY_LABEL = "离开期间（补记）"  # stored app name of away time the user re-labelled (it has no program of its own)  # stored app name of counted surface time, e.g. "界面:桌面"
+MANUAL_MARK = "（补记）"  # ends the stored name of time the user entered or re-labelled by hand
+AWAY_LABEL = "离开期间"+MANUAL_MARK  # stored app name of away time the user re-labelled (it has no program of its own)
 BROWSERS = {"chrome.exe", "msedge.exe", "firefox.exe", "brave.exe", "vivaldi.exe", "opera.exe", "360chrome.exe", "qqbrowser.exe"}
 SITES = {"douyin.com": "抖音", "iesdouyin.com": "抖音", "xiaohongshu.com": "小红书", "xhslink.com": "小红书", "bilibili.com": "B站", "b23.tv": "B站"}
 DEFAULTS = {
@@ -346,7 +347,7 @@ class Store:
                 if category == target:
                     continue
                 # Away time has no program: it moves under AWAY_LABEL, and back to "" when set to 离开 again.
-                new_app = "" if target == "idle" and app == AWAY_LABEL else AWAY_LABEL if category == "idle" and not app else app
+                new_app = "" if target == "idle" and app.endswith(MANUAL_MARK) else AWAY_LABEL if category == "idle" and not app else app
                 row = self.db.execute("SELECT seconds FROM usage WHERE day=? AND category=? AND app=? AND host=?", (day,category,app,host)).fetchone()
                 if not row:
                     continue
@@ -386,6 +387,104 @@ class Store:
                 moved += seconds
             self.db.execute("DELETE FROM usage WHERE seconds<0.000001")
         return moved
+
+    def segments(self, day: str):
+        """The day in order: (first minute, last minute, category, app, host, seconds) per stretch.
+
+        Each minute belongs to whatever filled most of it; neighbouring minutes of the same thing
+        join into one stretch. Minutes are indexes 0–1439, both ends included; seconds are that
+        activity's own recorded seconds inside the stretch.
+        """
+        rows = self.db.execute("""SELECT minute,category,app,host,seconds FROM minute_usage
+            WHERE minute>=? AND minute<? ORDER BY minute, seconds DESC""",
+            (day+"T00:00", (datetime.fromisoformat(day)+timedelta(days=1)).date().isoformat()+"T00:00")).fetchall()
+        result, seen = [], None
+        for minute, category, app, host, seconds in rows:
+            if minute == seen:
+                continue
+            seen = minute; index = int(minute[11:13])*60+int(minute[14:16])
+            if result and result[-1][1] == index-1 and tuple(result[-1][2:5]) == (category, app, host):
+                result[-1][1] = index; result[-1][5] += seconds
+            else:
+                result.append([index, index, category, app, host, seconds])
+        return [tuple(row) for row in result]
+
+    def reclassify_span(self, day, spans, target):
+        """Like reclassify, but only inside stretches of the day: spans are
+        (first minute, last minute, category, app, host). Undone by undo() like any correction."""
+        if target not in RULE_TARGETS:
+            raise ValueError("未知分类")
+        drop = target == IGNORE
+        stamp = lambda index: f"{day}T{index//60:02d}:{index % 60:02d}"
+        source, minutes = [], []
+        with self.db:
+            for first, last, category, app, host in sorted(set(spans)):
+                if category == target:
+                    continue
+                new_app = "" if target == "idle" and app.endswith(MANUAL_MARK) else AWAY_LABEL if category == "idle" and not app else app
+                rows = self.db.execute("""SELECT minute,seconds FROM minute_usage WHERE minute>=? AND minute<=?
+                    AND category=? AND app=? AND host=?""", (stamp(first), stamp(last), category, app, host)).fetchall()
+                if not rows:
+                    continue
+                moved = sum(seconds for _, seconds in rows)
+                source.append([category, app, host, moved, new_app])
+                self.db.execute("UPDATE usage SET seconds=seconds-? WHERE day=? AND category=? AND app=? AND host=?", (moved, day, category, app, host))
+                if not drop:
+                    self.db.execute("""INSERT INTO usage VALUES (?,?,?,?,?) ON CONFLICT(day,category,app,host)
+                        DO UPDATE SET seconds=seconds+excluded.seconds""", (day, target, new_app, host, moved))
+                for minute, seconds in rows:
+                    minutes.append([minute, category, app, host, seconds, new_app])
+                    self.db.execute("DELETE FROM minute_usage WHERE minute=? AND category=? AND app=? AND host=?", (minute, category, app, host))
+                    if not drop:
+                        self.db.execute("""INSERT INTO minute_usage VALUES (?,?,?,?,?) ON CONFLICT(minute,category,app,host)
+                            DO UPDATE SET seconds=seconds+excluded.seconds""", (minute, target, new_app, host, seconds))
+            self.db.execute("DELETE FROM usage WHERE seconds<0.000001")
+            if source:
+                self.db.execute("INSERT INTO corrections(day,payload,created) VALUES (?,?,?)",
+                    (day, json.dumps({"target": target, "rows": source, "minutes": minutes}), datetime.now().isoformat(timespec="seconds")))
+        return len(source)
+
+    def add_manual(self, start: datetime, end: datetime, category: str, name: str) -> float:
+        """Record [start, end) of one day after the fact (a meeting, reading on paper, a class).
+
+        Whole minutes only. Away time inside the span is re-labelled and unrecorded time is filled
+        in; time already recorded for a program is left alone. The time is stored under `name` plus
+        MANUAL_MARK. Returns the seconds now counted; undo() takes all of it back.
+        """
+        start = start.replace(second=0, microsecond=0); end = end.replace(second=0, microsecond=0)
+        if end <= start or start.date() != (end-timedelta(minutes=1)).date() or category not in CATEGORIES:
+            raise ValueError("补记的时间段无效")
+        day = start.date().isoformat(); app = (name.strip()[:20] or "补记").removesuffix(MANUAL_MARK)+MANUAL_MARK
+        away = ("idle", "", ""); moved_minutes, extra_minutes, moved, extra = [], [], 0.0, 0.0
+        with self.db:
+            cursor = start
+            while cursor < end:
+                minute = cursor.isoformat(timespec="minutes"); cursor += timedelta(minutes=1)
+                idle = self.db.execute("SELECT COALESCE(SUM(seconds),0) FROM minute_usage WHERE minute=? AND category=? AND app=? AND host=?", (minute, *away)).fetchone()[0]
+                used = self.db.execute("SELECT COALESCE(SUM(seconds),0) FROM minute_usage WHERE minute=?", (minute,)).fetchone()[0]-idle
+                free = max(0.0, 60.0-used); take = min(idle, free); fill = free-take
+                if take > 0:
+                    self.db.execute("DELETE FROM minute_usage WHERE minute=? AND category=? AND app=? AND host=?", (minute, *away))
+                    if idle-take > 0.000001:
+                        self.db.execute("INSERT INTO minute_usage VALUES (?,?,?,?,?)", (minute, *away, idle-take))
+                    moved_minutes.append([minute, *away, take, app]); moved += take
+                if fill > 0:
+                    extra_minutes.append([minute, category, app, "", fill]); extra += fill
+                if take+fill > 0:
+                    self.db.execute("""INSERT INTO minute_usage VALUES (?,?,?,?,?) ON CONFLICT(minute,category,app,host)
+                        DO UPDATE SET seconds=seconds+excluded.seconds""", (minute, category, app, "", take+fill))
+            if moved+extra <= 0:
+                return 0.0
+            if moved:
+                self.db.execute("UPDATE usage SET seconds=seconds-? WHERE day=? AND category=? AND app=? AND host=?", (moved, day, *away))
+                self.db.execute("DELETE FROM usage WHERE seconds<0.000001")
+            self.db.execute("""INSERT INTO usage VALUES (?,?,?,?,?) ON CONFLICT(day,category,app,host)
+                DO UPDATE SET seconds=seconds+excluded.seconds""", (day, category, app, "", moved+extra))
+            payload = {"target": category, "rows": [[*away, moved, app]] if moved else [], "minutes": moved_minutes,
+                       "extra_rows": [[category, app, "", extra]] if extra else [], "extra_minutes": extra_minutes}
+            self.db.execute("INSERT INTO corrections(day,payload,created) VALUES (?,?,?)",
+                            (day, json.dumps(payload), datetime.now().isoformat(timespec="seconds")))
+        return moved+extra
 
     def used_today(self, day: str, key: str) -> float:
         """Seconds on `day` for a program ("x.exe") or a website and its subdomains, across categories."""
@@ -435,6 +534,11 @@ class Store:
                     self.db.execute("UPDATE minute_usage SET seconds=seconds-? WHERE minute=? AND category=? AND app=? AND host=?", (seconds,minute,target,moved_to[0] if moved_to else app,host))
                 self.db.execute("""INSERT INTO minute_usage VALUES (?,?,?,?,?) ON CONFLICT(minute,category,app,host)
                     DO UPDATE SET seconds=seconds+excluded.seconds""", (minute,category,app,host,seconds))
+            # Time that add_manual() filled in (it came from nowhere, so it simply goes away again).
+            for category, app, host, seconds in data.get("extra_rows", []):
+                self.db.execute("UPDATE usage SET seconds=seconds-? WHERE day=? AND category=? AND app=? AND host=?", (seconds,day,category,app,host))
+            for minute, category, app, host, seconds in data.get("extra_minutes", []):
+                self.db.execute("UPDATE minute_usage SET seconds=seconds-? WHERE minute=? AND category=? AND app=? AND host=?", (seconds,minute,category,app,host))
             self.db.execute("DELETE FROM usage WHERE seconds<0.000001")
             self.db.execute("DELETE FROM minute_usage WHERE seconds<0.000001")
             self.db.execute("UPDATE corrections SET undone=1 WHERE id=?", (ident,))

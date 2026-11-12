@@ -109,9 +109,9 @@ def icon_for(key: str, category: str = "unknown") -> QIcon:
     cached = _cache.get((key, category))
     if cached is not None:
         return cached
-    from core import AWAY_LABEL
-    if key.startswith("界面:") or key == AWAY_LABEL:
-        result = _glyph("monitor" if key.startswith("界面:") else "idle", category if category in COLORS else "unknown")
+    from core import AWAY_LABEL, MANUAL_MARK
+    if key.startswith("界面:") or key.endswith(MANUAL_MARK):
+        result = _glyph("monitor" if key.startswith("界面:") else "idle" if key == AWAY_LABEL else "pen", category if category in COLORS else "unknown")
         _cache[(key, category)] = result
         return result
     result = None

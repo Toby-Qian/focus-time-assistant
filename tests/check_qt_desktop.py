@@ -194,6 +194,50 @@ def check():
         w.choose_theme("indigo"); assert not w.theme_restart.isVisibleTo(w)
         # Analysis page: range ranking and hour profile come from the same records.
         w.navigate(1); assert w.range_rank.entries and w.range_rank.entries[0][3]>0,"范围排行为空"
+        # A day picked in the calendar never makes the page wider than the window, nor scrolls it.
+        from PySide6.QtCore import QEvent,QPoint
+        from PySide6.QtWidgets import QToolTip
+        w.navigate(1); bar=w.analysis_view.verticalScrollBar(); bar.setValue(40); q.processEvents()
+        for back in (2,5):
+            w.show_analysis_day((now.date()-timedelta(days=back)).isoformat(),keep_scroll=True); q.processEvents()
+            assert w.analysis_view.horizontalScrollBar().maximum()==0,"选中某天后页面比窗口宽"
+            assert bar.value()==min(40,bar.maximum()),"点日历后页面滚动了"
+        # A chart's tooltip goes away as soon as the pointer leaves it.
+        QToolTip.showText(w.heatmap.mapToGlobal(QPoint(20,20)),"check",w.heatmap); q.processEvents()
+        if QToolTip.isVisible():
+            QApplication.sendEvent(w.heatmap,QEvent(QEvent.Type.Leave)); assert not QToolTip.isVisible(),"离开后提示框还在"
+        # 更多 ranges: 上周 is Monday–Sunday of last week; picking a day or a segment leaves it again.
+        w.choose_custom("lastweek"); first,last=w.analysis_dates(); monday=now.date()-timedelta(days=now.weekday())
+        assert (first,last)==((monday-timedelta(days=7)).isoformat(),(monday-timedelta(days=1)).isoformat()) and w.more_range.text()=="上周","上周范围不对"
+        w.choose_custom("custom",(now.date()-timedelta(days=9)).isoformat(),(now.date()-timedelta(days=2)).isoformat()); assert w.analysis_span()==(8,2)
+        w.range_combo.setCurrentIndex(0); w.choose_range(); assert w.analysis_custom is None and not w.more_range.isChecked() and w.analysis_span()==(1,0)
+        # 按时间: one stretch of a past day is re-labelled without touching the rest or the rules; undo restores it.
+        past=datetime.combine(now.date()-timedelta(days=3),datetime.min.time())+timedelta(hours=9); past_day=past.date().isoformat()
+        w.store.add(past,past+timedelta(minutes=30),Activity("work","stretch.exe")); w.store.add(past+timedelta(minutes=30),past+timedelta(minutes=50),Activity("idle"))
+        w.store.add(past+timedelta(minutes=50),past+timedelta(minutes=80),Activity("work","stretch.exe"))
+        w.open_manager(day=past_day); w.manager_view.setCurrentIndex(1); q.processEvents()
+        assert w.table.rowCount()==3 and w.table.item(1,1).text()=="09:30 – 09:50" and not w.change_future.isVisibleTo(w),"按时间视图不对"
+        rules_before=json.dumps(w.config["app_rules"],sort_keys=True); w.table.selectRow(2); w.apply_classification("distraction")
+        totals=w.store.totals(past_day); assert (totals["work"],totals["distraction"])==(1800,1800) and json.dumps(w.config["app_rules"],sort_keys=True)==rules_before,"只改一段失败"
+        w.undo_correction(); assert w.store.totals(past_day)["work"]==3600
+        # 补记: the away stretch becomes work under the given name, and can be undone.
+        assert w.store.add_manual(past+timedelta(minutes=30),past+timedelta(minutes=50),"work","开会")==1200
+        w.records_changed(); w.refresh_manager(force=True); assert w.table.item(1,2).text()=="开会（补记）" and w.store.totals(past_day)["idle"]==0,"补记失败"
+        w.undo_correction(); assert w.store.totals(past_day)["idle"]==1200
+        w.manager_view.setCurrentIndex(0); q.processEvents(); assert w.table.horizontalHeaderItem(1).text()=="应用" and w.change_future.isVisibleTo(w)
+        # Backup and restore: records come back exactly, and what was there is kept in a file beside them.
+        import sqlite3
+        saved=w.data_dir/"backup_check.sqlite3"; w.store.flush(); target=sqlite3.connect(saved); w.store.db.backup(target); target.close()
+        before_restore=w.store.totals(past_day); w.store.add(past+timedelta(hours=3),past+timedelta(hours=4),Activity("work","later.exe")); w.store.flush()
+        assert w.inspect_backup(saved)[0]>=1; aside=w.restore_from(saved)
+        assert w.store.totals(past_day)==before_restore and aside.exists() and w.inspect_backup(aside)[0]>=1,"恢复备份失败"
+        try: w.inspect_backup(w.config_path); raise AssertionError("把设置文件当成了备份")
+        except ValueError: pass
+        # Settings: two tabs; the rule table fills on demand. First-run dialog hands back a goal in minutes.
+        w.navigate(3); w.switch_settings(1); assert w.settings_stack.currentIndex()==1 and w.rules_table.rowCount()>0 and w.settings_tab.currentIndex()==1
+        w.switch_settings(0)
+        from desktop import WelcomeDialog
+        welcome=WelcomeDialog(w,360,False); welcome.goal.setValue(4); welcome.autostart.setChecked(True); assert welcome.values()==(240,True); welcome.deleteLater()
         # Report export writes the chosen parts (dialog skipped: call the exporter directly).
         import report
         out=folder/"report_check"; written=report.export(w.store,out,day,day,["daily","apps"],"both","#4B5FE0")

@@ -79,7 +79,16 @@ def shoot():
         if index == 2:
             w.notify("已设为工作：修正 1 条记录，以后也这样记录", lambda: None); q.processEvents()
             w.grab().save(str(out/"3b_toast.png")); w.toast.hide()
-    from desktop import Reminder, FocusDialog
+            w.manager_view.setCurrentIndex(1); settle(); w.table.selectRow(4); q.processEvents(); w.grab().save(str(out/"3c_by_time.png"))
+            assert w.table.horizontalHeaderItem(1).text() == "时间" and not w.change_future.isVisibleTo(w)
+            w.manager_view.setCurrentIndex(0); q.processEvents()
+        if index == 3:
+            w.switch_settings(1); settle(); w.grab().save(str(out/"4b_rules.png")); w.switch_settings(0); q.processEvents()
+    from desktop import Reminder, FocusDialog, ManualDialog, RangeDialog, WelcomeDialog
+    today = datetime.now().date().isoformat()
+    for name, dialog in (("9_manual_dialog", ManualDialog(w, today, 14*60, 15*60+30, 23*60)), ("9b_range_dialog", RangeDialog(w, "2026-10-01", "2026-10-20", None)),
+                         ("9c_welcome", WelcomeDialog(w, 360, False))):
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen); dialog.show(); q.processEvents(); dialog.grab().save(str(out/f"{name}.png")); dialog.close()
     w.start_focus(25, "论文第三节"); w.focus["mono"] -= 9*60+12; w.update_float(); q.processEvents(); w.floater.grab().save(str(out/"7_float_focus.png"))
     w.current = Activity("distraction", "chrome.exe", "www.bilibili.com", "B站"); w.update_float(); q.processEvents(); w.floater.grab().save(str(out/"7b_float_distracted.png"))
     w.focus["mono"] -= w.focus["planned"]; w.finish_focus(completed=True); w.rest_break["mono"] -= 70; w.update_float(); q.processEvents()
@@ -91,7 +100,12 @@ def shoot():
     if isinstance(area, QScrollArea): area.verticalScrollBar().setValue(area.verticalScrollBar().maximum()); settle(.2)
     w.grab().save(str(out/"2b_analysis_lower.png"))
     bar = area.verticalScrollBar(); bar.setValue(bar.maximum()//2); settle(.2); w.grab().save(str(out/"2c_analysis_middle.png"))
+    w.choose_custom("lastweek"); settle(); bar.setValue(0); settle(.2); w.grab().save(str(out/"2f_last_week.png"))
+    assert w.more_range.isChecked() and w.more_range.text() == "上周" and w.analysis_span()[0] == 7
+    w.choose_custom("custom", (start-timedelta(days=50)).date().isoformat(), start.date().isoformat()); settle()
+    bar.setValue(bar.maximum()//3); settle(.2); w.grab().save(str(out/"2g_custom_51_days.png"))
     w.show_analysis_day(datetime.now().date().isoformat()); settle()  # today: the hour mark path
+    assert w.analysis_custom is None and not w.more_range.isChecked()
     assert w.analysis_dates()[0] == datetime.now().date().isoformat() and "前一天" in w.compare_title.text()
     w.show_analysis_day((start-timedelta(days=5)).date().isoformat()); settle(); w.grab().save(str(out/"2d_analysis_day.png"))
     bar.setValue(bar.maximum()//2); settle(.2); w.grab().save(str(out/"2e_analysis_day_middle.png"))
@@ -101,5 +115,12 @@ def shoot():
     w.shutdown(); q.quit()
 
 
-QTimer.singleShot(700, shoot)
-q.exec()
+def run():
+    try: shoot()
+    except BaseException:
+        import traceback
+        traceback.print_exc(); w.shutdown(); q.exit(1)
+
+
+QTimer.singleShot(700, run)
+sys.exit(q.exec())

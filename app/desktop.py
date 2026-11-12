@@ -24,7 +24,8 @@ import time
 from PySide6.QtCore import Qt, QByteArray, QDate, QSize, QTimer, QUrl
 from PySide6.QtGui import QColor, QCursor, QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QApplication, QWidget, QFrame, QVBoxLayout, QHBoxLayout, QTableWidgetItem, QMessageBox,
-    QDialog, QFormLayout, QComboBox, QLineEdit, QDialogButtonBox, QSystemTrayIcon, QMenu, QGraphicsDropShadowEffect)
+    QDialog, QFormLayout, QComboBox, QLineEdit, QDialogButtonBox, QSystemTrayIcon, QMenu, QGraphicsDropShadowEffect,
+    QCheckBox, QDateEdit, QSpinBox)
 from core import Activity, Accountant, CATEGORIES, IGNORE, LABELS, OWN_WINDOW_MODES, RULE_TARGETS, Store, SITES, classify, hostname, load_config, save_config, streaks
 from core import SURFACES, SURFACE_TARGETS, SURFACE_PREFIX
 from insights import insights, work_rhythm
@@ -49,13 +50,18 @@ MESSAGES = {"work": "正在计入工作，保持节奏。", "distraction": "正�
             "idle": "暂时没有操作，正在记录离开时间。", "unknown": "还不知道这算什么，点右侧“调整分类”告诉我。",
             IGNORE: "设为不计入，这段时间不记录。"}
 OWN_PID = os.getpid()
-from core import AWAY_LABEL  # stored app name of away time the user counted as work
+from core import AWAY_LABEL, MANUAL_MARK  # stored app name of away time the user counted as work; mark of hand-entered time
 
 
 def popup_menu(parent):
     """A context / drop-down menu that frees itself once closed."""
     menu = QMenu(parent); menu.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
     return menu
+
+
+def tint(colour, alpha=34):
+    """A see-through version of a colour, for soft pill backgrounds in any theme."""
+    c = QColor(colour); return f"rgba({c.red()},{c.green()},{c.blue()},{alpha})"
 
 
 def duration(seconds):
@@ -328,13 +334,129 @@ class RuleDialog(QDialog):
         super().accept()
 
 
+class ManualDialog(QDialog):
+    """Enter a stretch the computer could not see (a meeting, a class, reading on paper)."""
+    PRESETS = ("开会", "上课", "看纸质资料", "讨论", "打电话")
+
+    def __init__(self, parent, day, begin, end, latest):
+        super().__init__(parent); self.latest = latest  # last minute of the day that may be entered (now, for today)
+        self.setWindowTitle("补记时间"); self.setMinimumWidth(480)
+        layout = QVBoxLayout(self); layout.setContentsMargins(24, 22, 24, 20); layout.setSpacing(14)
+        layout.addWidget(text(f"补记 {parent.day_name(day)} 的一段时间", "heading"))
+        layout.addWidget(text("用来补上电脑没记到的事。这段时间里已经记下的程序保持不变，只把离开和没有记录的部分补上。", "muted", wrap=True))
+        form = QFormLayout(); form.setSpacing(12)
+        self.clocks = []
+        for minute in (begin, end):
+            row = QHBoxLayout(); row.setSpacing(8); pair = []
+            for value, high, suffix, step in ((minute//60, 23, " 时", 1), (minute % 60, 59, " 分", 5)):
+                box = QSpinBox(); box.setRange(0, high); box.setValue(value); box.setSuffix(suffix); box.setSingleStep(step)
+                box.setFixedWidth(104); box.setWrapping(True); box.valueChanged.connect(self.update_note); row.addWidget(box); pair.append(box)
+            row.addStretch(); holder = QWidget(); holder.setLayout(row); row.setContentsMargins(0, 0, 0, 0); self.clocks.append((pair, holder))
+        form.addRow("开始", self.clocks[0][1]); form.addRow("结束", self.clocks[1][1])
+        self.name = QComboBox(); self.name.setEditable(True); self.name.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.name.addItems(self.PRESETS); self.name.setCurrentIndex(-1); self.name.setCurrentText("")
+        self.name.lineEdit().setPlaceholderText("例如：开会、上课、看纸质资料"); self.name.lineEdit().setMaxLength(20)
+        form.addRow("做了什么", self.name)
+        self.category = Segmented([(LABELS[key], key) for key in ("work", "distraction")])
+        holder = QWidget(); row = QHBoxLayout(holder); row.setContentsMargins(0, 0, 0, 0); row.addWidget(self.category); row.addStretch()
+        form.addRow("记为", holder); layout.addLayout(form)
+        self.note = text("", "small", wrap=True); layout.addWidget(self.note)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.ok = buttons.button(QDialogButtonBox.StandardButton.Ok); self.ok.setText("补记"); self.ok.setProperty("role", "primary"); self.ok.setDefault(True)
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject); layout.addWidget(buttons)
+        self.update_note(); self.name.setFocus()
+
+    def span(self):
+        return tuple(pair[0].value()*60+pair[1].value() for pair, _ in self.clocks)
+
+    def update_note(self, *_):
+        begin, end = self.span(); problem = ""
+        if end <= begin: problem = "结束时间要晚于开始时间。"
+        elif end > self.latest: problem = "不能补记还没到的时间。"
+        restyle(self.note, f"color:{P['danger']};" if problem else "")
+        self.note.setText(problem or f"共 {short_time((end-begin)*60)}。补记的时间会标上“（补记）”，之后可以撤销，也能再改分类。")
+        self.ok.setEnabled(not problem)
+
+    def values(self):
+        begin, end = self.span()
+        return begin, end, self.category.currentData(), self.name.currentText().strip()[:20]
+
+
+class RangeDialog(QDialog):
+    """Pick the first and last day of a custom analysis range."""
+    LONGEST = 92
+
+    def __init__(self, parent, first, last, earliest):
+        super().__init__(parent)
+        self.setWindowTitle("自定义范围"); self.setMinimumWidth(420)
+        layout = QVBoxLayout(self); layout.setContentsMargins(24, 22, 24, 20); layout.setSpacing(14)
+        layout.addWidget(text("分析哪一段时间？", "heading"))
+        form = QFormLayout(); form.setSpacing(12); self.edits = []
+        for value in (first, last):
+            edit = QDateEdit(QDate.fromString(value, "yyyy-MM-dd")); edit.setCalendarPopup(True); edit.setDisplayFormat("yyyy-MM-dd")
+            edit.setMaximumDate(QDate.currentDate()); edit.setFixedWidth(170); edit.dateChanged.connect(self.update_note); self.edits.append(edit)
+            if earliest: edit.setMinimumDate(QDate.fromString(earliest, "yyyy-MM-dd"))
+        form.addRow("从", self.edits[0]); form.addRow("到", self.edits[1]); layout.addLayout(form)
+        self.note = text("", "small", wrap=True); layout.addWidget(self.note)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.ok = buttons.button(QDialogButtonBox.StandardButton.Ok); self.ok.setText("开始分析"); self.ok.setProperty("role", "primary"); self.ok.setDefault(True)
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject); layout.addWidget(buttons)
+        self.update_note()
+
+    def update_note(self, *_):
+        days = self.edits[0].date().daysTo(self.edits[1].date())+1
+        problem = "结束日期不能早于开始日期。" if days < 1 else f"最长 {self.LONGEST} 天，请缩短一些。" if days > self.LONGEST else ""
+        restyle(self.note, f"color:{P['danger']};" if problem else "")
+        self.note.setText(problem or f"共 {days} 天；会和它前面的 {days} 天比较。")
+        self.ok.setEnabled(not problem)
+
+    def values(self):
+        return tuple(edit.date().toString("yyyy-MM-dd") for edit in self.edits)
+
+
+class WelcomeDialog(QDialog):
+    """Shown once on the very first start: what the program does, a daily goal, start with Windows."""
+    POINTS = (("overview", "自动记录，不用打卡", "只算你正在操作的那个窗口，分成工作、摸鱼、系统工具、离开和待分类。分错了随时能改。"),
+              ("bell", "刷太久会提醒一下", "在抖音、B站、小红书这类网站停太久，屏幕中间弹个提醒；不锁屏，也不抢键盘。"),
+              ("shield", "数据只在这台电脑上", "没有账号，不联网上传；不保存网址、页面标题、截图和按键。"))
+
+    def __init__(self, parent, goal, autostart):
+        super().__init__(parent)
+        self.setWindowTitle("欢迎使用专注时间助手"); self.setMinimumWidth(520)
+        layout = QVBoxLayout(self); layout.setContentsMargins(28, 26, 28, 22); layout.setSpacing(16)
+        title = text("看清时间都花在了哪"); title.setStyleSheet("font-size:20px;font-weight:700;"); layout.addWidget(title)
+        for kind, head, detail in self.POINTS:
+            row = QHBoxLayout(); row.setSpacing(14)
+            chip = QFrame(); chip.setFixedSize(34, 34); chip.setStyleSheet(f"background:{P['soft']};border-radius:9px;")
+            inner = QHBoxLayout(chip); inner.setContentsMargins(8, 8, 8, 8); inner.addWidget(IconLabel(icon(kind, ACCENT, 18), 18))
+            row.addWidget(chip, 0, Qt.AlignmentFlag.AlignTop)
+            column = QVBoxLayout(); column.setSpacing(2); column.addWidget(text(head, "heading")); column.addWidget(text(detail, "muted", wrap=True))
+            row.addLayout(column, 1); layout.addLayout(row)
+        box = QFrame(); box.setObjectName("note"); form = QFormLayout(box); form.setContentsMargins(16, 14, 16, 14); form.setSpacing(10)
+        self.goal = QSpinBox(); self.goal.setRange(0, 16); self.goal.setValue(round(goal/60)); self.goal.setSuffix(" 小时"); self.goal.setSpecialValueText("不设目标")
+        self.goal.setFixedWidth(124); self.goal.setToolTip("每天想工作 / 学习多久；侧栏会显示进度，以后可以在设置里改")
+        self.autostart = QCheckBox("登录 Windows 后自动在托盘运行"); self.autostart.setChecked(autostart)
+        form.addRow("每日工作目标", self.goal); form.addRow("开机启动", self.autostart); layout.addWidget(box)
+        layout.addWidget(text("关闭窗口后，它会留在右下角的托盘里继续记录；要彻底退出，右键托盘图标选“退出程序”。", "small", wrap=True))
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+        start = buttons.button(QDialogButtonBox.StandardButton.Ok); start.setText("开始使用"); start.setProperty("role", "primary"); start.setDefault(True)
+        start.setMinimumHeight(36); buttons.accepted.connect(self.accept); layout.addWidget(buttons)
+
+    def values(self):
+        return self.goal.value()*60, self.autostart.isChecked()
+
+
 class App(Shell):
     analysis_day = None  # one day picked from the calendar / a bar, instead of a range
+    analysis_custom = None  # ("week" | "lastweek" | "month" | "lastmonth" | "custom", first day, last day) from the 更多 menu
     analysis_last = None  # last day of what the analysis page shows
     def __init__(self, data_dir: Path, project: Path, testing=False):
         super().__init__()
         self.project = project; self.data_dir = data_dir; self.testing = testing
-        self.config_path = data_dir/"settings.json"; self.config = load_config(self.config_path)
+        self.config_path = data_dir/"settings.json"; self.first_run = not self.config_path.exists()
+        self.config = load_config(self.config_path)
         theme.SITE_ALIASES = self.config["site_names"]; theme.APP_ALIASES = self.config["app_names"]
         self.store = Store(data_dir/"activity.sqlite3"); self.accountant = Accountant(self.store)
         appicons.load(data_dir/"app_paths.json", data_dir/"site_icons")
@@ -365,6 +487,7 @@ class App(Shell):
         QShortcut(QKeySequence("Ctrl+P"), self).activated.connect(self.toggle_pause)
         QShortcut(QKeySequence("Ctrl+F"), self).activated.connect(self.focus_search)
         QShortcut(QKeySequence("Ctrl+Z"), self).activated.connect(self.undo_shortcut)
+        QShortcut(QKeySequence("F5"), self).activated.connect(lambda: self.refresh(force=True))
         QShortcut(QKeySequence("Ctrl+Shift+F"), self).activated.connect(lambda: self.focus_clicked() if self.focus or self.rest_break else self.start_focus())
         for index in range(5):
             QShortcut(QKeySequence(f"Ctrl+{index+1}"), self).activated.connect(lambda i=index: self.navigate(i))
@@ -380,6 +503,8 @@ class App(Shell):
         self.tray = QSystemTrayIcon(icon("logo", ACCENT, 32), self)
         self.tray.setToolTip("专注时间助手 · 正在记录")
         menu = QMenu()
+        self.tray_today = menu.addAction(""); self.tray_today.setEnabled(False); menu.addSeparator()
+        menu.aboutToShow.connect(self.update_tray_menu)
         menu.addAction("打开专注时间助手", self.bring_forward)
         self.tray_focus = menu.addAction("开始专注", self.tray_focus_action)
         self.tray_pause = menu.addAction("暂停记录", self.toggle_pause)
@@ -390,6 +515,10 @@ class App(Shell):
         self.tray.activated.connect(lambda reason: self.bring_forward() if reason in (QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick) else None)
         if not self.testing: self.tray.show()
         self.tray_menu = menu
+
+    def update_tray_menu(self):
+        totals = self.store.totals(datetime.now().date().isoformat()); goal = self.config["work_goal_minutes"]*60
+        self.tray_today.setText(f"今天工作 {short_time(totals['work'])}" + (f" / {short_time(goal)}" if goal else "") + f" · 摸鱼 {short_time(totals['distraction'])}")
 
     def bring_forward(self):
         if self.isMinimized(): self.showNormal()
@@ -429,6 +558,17 @@ class App(Shell):
         if P.get("dark") and not getattr(self, "_dark_title", False):
             self._dark_title = True; windows.dark_title_bar(int(self.winId()))
         if hasattr(self, "store"): QTimer.singleShot(0, lambda: self.refresh(force=True))
+        if getattr(self, "first_run", False) and not self.testing:
+            self.first_run = False; QTimer.singleShot(350, self.show_welcome)
+
+    def show_welcome(self):
+        """First start only: say what the program does and take a daily goal."""
+        dialog = WelcomeDialog(self, self.config["work_goal_minutes"], self.autostart_enabled())
+        if dialog.exec() != QDialog.DialogCode.Accepted: return
+        goal, autostart = dialog.values()
+        self.goal_spin.setValue(goal)
+        if autostart != self.autostart_check.isChecked(): self.autostart_check.setChecked(autostart)
+        self.preferences_timer.stop(); self.save_preferences()
 
     def changeEvent(self, event):
         super().changeEvent(event)
@@ -453,6 +593,8 @@ class App(Shell):
     def restore_window(self):
         if self.config.get("window"):
             self.restoreGeometry(QByteArray.fromHex(self.config["window"].encode()))
+        # Never resized by the user (still the old built-in size, or nothing saved): the new default.
+        if (not self.config.get("window") or self.size() == self.OLD_DEFAULT) and not self.isMaximized(): self.place_default()
         if self.config.get("page"): self.navigate(self.config["page"])
         if self.config.get("rhythm_view"): self.rhythm_mode.setCurrentIndex(self.config["rhythm_view"])
 
@@ -565,7 +707,7 @@ class App(Shell):
             self.settle(); self.store.move_minutes(began, ended, ("work", AWAY_LABEL, ""), ("idle", "", ""))
             self.notify("已改回离开。"); self.manager_signature = None; self.refresh(force=True)
         self.notify(f"已把离开的 {short_time(moved)} 算作工作", undo, seconds=8)
-        self.manager_signature = None; self.refresh(force=True)
+        self.records_changed(); self.refresh(force=True)
 
     def check_app_limits(self, today):
         """One reminder per program / website per day when its own daily limit is reached."""
@@ -662,6 +804,63 @@ class App(Shell):
         folder = Path(path).parent
         self.notify(f"已备份到 {Path(path).name}", lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder))), "打开文件夹", seconds=8)
 
+    def restore_data(self):
+        """Replace every record with a backup file; the present records are saved aside first."""
+        from PySide6.QtWidgets import QFileDialog
+        import sqlite3
+        path, _ = QFileDialog.getOpenFileName(self, "选择要恢复的备份", str(self.project/"exports"), "记录数据库 (*.sqlite3)")
+        if not path: return
+        live = self.data_dir/"activity.sqlite3"
+        if Path(path).resolve() == live.resolve():
+            QMessageBox.information(self, "这是正在使用的记录", "选中的就是程序现在用的记录文件，不需要恢复。"); return
+        try:
+            days, first, last = self.inspect_backup(path)
+        except (OSError, ValueError):
+            QMessageBox.warning(self, "不能用这个文件恢复", "它不是本程序的备份，或者文件已经损坏。"); return
+        box = QMessageBox(self); box.setIcon(QMessageBox.Icon.Question); box.setWindowTitle("恢复备份")
+        box.setText(f"这份备份里有 {days} 天的记录（{first} 到 {last}）。" if days else "这份备份里没有记录。")
+        box.setInformativeText("恢复后，现在的全部记录会换成备份里的内容。\n替换前会先把现在的记录另存到数据文件夹；分类规则和设置不受影响。")
+        go = box.addButton("恢复", QMessageBox.ButtonRole.AcceptRole); box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is not go: return
+        try:
+            aside = self.restore_from(path)
+        except (OSError, ValueError):
+            logging.exception("Restore failed"); QMessageBox.warning(self, "未能恢复", "恢复没有完成，现在的记录没有变化。"); return
+        self.notify(f"已恢复 {days} 天的记录；之前的记录另存为 {aside.name}", lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.data_dir))), "打开文件夹", seconds=10)
+
+    @staticmethod
+    def inspect_backup(path):
+        """(days, first day, last day) of a backup file; ValueError when it is not one of ours."""
+        import sqlite3
+        try:
+            source = sqlite3.connect(f"{Path(path).resolve().as_uri()}?mode=ro", uri=True)
+            try:
+                tables = {row[0] for row in source.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                if not {"usage", "minute_usage"} <= tables: raise ValueError("not a record database")
+                return source.execute("SELECT COUNT(DISTINCT day), MIN(day), MAX(day) FROM usage").fetchone()
+            finally:
+                source.close()
+        except sqlite3.Error as error:
+            raise ValueError(str(error)) from error
+
+    def restore_from(self, path):
+        """Swap in the records of a backup; returns the file the present records were saved to."""
+        import sqlite3
+        self.inspect_backup(path); self.settle(); self.store.flush()
+        aside = self.data_dir/f"恢复前的记录_{datetime.now():%Y%m%d_%H%M%S}.sqlite3"; live = self.data_dir/"activity.sqlite3"
+        try:
+            keep = sqlite3.connect(aside); self.store.db.backup(keep); keep.close()
+            source = sqlite3.connect(f"{Path(path).resolve().as_uri()}?mode=ro", uri=True)
+            try: source.backup(self.store.db)
+            finally: source.close()
+        except sqlite3.Error as error:
+            raise ValueError(str(error)) from error
+        self.store.close(); self.store = Store(live); self.accountant = Accountant(self.store)  # reopen: adds what an old backup lacks
+        self.compare = {}; self.streak_cache = {}; self.rhythm_cache = (None, None); self.goal_flags = {}; self.manager_signature = None
+        self.refresh(force=True)
+        return aside
+
     def open_data_folder(self):
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.data_dir)))
 
@@ -679,7 +878,7 @@ class App(Shell):
         if index == 0: self.refresh_overview(force or self.ticks % OVERVIEW_CHARTS_EVERY == 0)
         elif index == 1 and (force or self.ticks % ANALYSIS_EVERY == 0): self.refresh_analysis()
         elif index == 2 and (force or self.ticks % MANAGER_EVERY == 0): self.refresh_manager()
-        elif index == 3 and force: self.refresh_rules()
+        elif index == 3 and force and self.settings_stack.currentIndex() == 1: self.refresh_rules()
         elif index == 4: self.refresh_connection()
 
     def refresh_header(self):
@@ -824,22 +1023,68 @@ class App(Shell):
             self.compare = {"stamp": stamp, "totals": self.store.totals_until(yesterday, now.strftime("%H:%M"))}
         before = self.compare["totals"]
         for key, card in self.stat_cards.items():
-            if before is None:
-                set_text(card.delta, "昨天此时无记录"); restyle(card.delta, f"color:{SUBTLE};"); continue
+            if before is None:  # nothing to compare with: say where the day stands against the goal / limit instead
+                note, colour = "", SUBTLE
+                goal, limit = self.config["work_goal_minutes"]*60, self.config["distraction_limit_minutes"]*60
+                if key == "work" and goal:
+                    done = totals["work"] >= goal
+                    note = "已达成今天的目标" if done else f"离目标还差 {short_time(goal-totals['work'])}"; colour = TEXTS["work"] if done else SUBTLE
+                elif key == "distraction" and limit:
+                    over = totals["distraction"] > limit
+                    note = f"超出上限 {short_time(totals['distraction']-limit)}" if over else f"离上限还有 {short_time(limit-totals['distraction'])}"
+                    colour = P["danger"] if over else SUBTLE
+                set_text(card.delta, note); restyle(card.delta, f"color:{colour};"); continue
             diff = totals[key]-before[key]
             if abs(diff) < 60:
                 set_text(card.delta, "与昨天此时持平"); restyle(card.delta, f"color:{SUBTLE};"); continue
             good = {"work": diff > 0, "distraction": diff < 0}.get(key)
             colour = SUBTLE if good is None else TEXTS["work"] if good else P['danger']
-            set_text(card.delta, f"比昨天此时{'多' if diff > 0 else '少'} {short_time(abs(diff))}")
-            restyle(card.delta, f"color:{colour};")
+            set_text(card.delta, f"{'↑' if diff > 0 else '↓'} 比昨天此时{'多' if diff > 0 else '少'} {short_time(abs(diff))}")
+            card.delta.setToolTip("" if good is None else "颜色看好坏，箭头看多少：绿色是比昨天好（工作多了 / 摸鱼少了），红色是比昨天差（工作少了 / 摸鱼多了）")
+            restyle(card.delta, f"color:{colour};font-weight:600;" if good is not None else f"color:{colour};")
 
     # ── time analysis ─────────────────────────────────────────────────
     def analysis_span(self):
         """(number of days, days back from today to the last one) of what the analysis page shows."""
+        today = datetime.now().date()
         if self.analysis_day:
-            return 1, (datetime.now().date()-datetime.fromisoformat(self.analysis_day).date()).days
+            return 1, (today-datetime.fromisoformat(self.analysis_day).date()).days
+        if self.analysis_custom:
+            first, last = self.custom_dates()
+            return (last-first).days+1, (today-last).days
         return self.range_combo.currentData()
+
+    RANGE_NAMES = {"week": "本周", "lastweek": "上周", "month": "本月", "lastmonth": "上月"}
+
+    def custom_dates(self):
+        """First and last day of the range chosen in the 更多 menu; 本周 / 本月 move with the calendar."""
+        kind, first, last = self.analysis_custom; today = datetime.now().date()
+        monday = today-timedelta(days=today.weekday()); month = today.replace(day=1)
+        if kind == "week": return monday, today
+        if kind == "lastweek": return monday-timedelta(days=7), monday-timedelta(days=1)
+        if kind == "month": return month, today
+        if kind == "lastmonth": return (month-timedelta(days=1)).replace(day=1), month-timedelta(days=1)
+        return datetime.fromisoformat(first).date(), datetime.fromisoformat(last).date()
+
+    def range_menu(self):
+        self.more_range.setChecked(bool(self.analysis_custom))  # the click toggled it; the menu decides
+        menu = popup_menu(self); chosen = (self.analysis_custom or ("",))[0]
+        for kind, title in self.RANGE_NAMES.items():
+            action = menu.addAction(title, lambda k=kind: self.choose_custom(k)); action.setCheckable(True); action.setChecked(kind == chosen)
+        menu.addSeparator()
+        action = menu.addAction("自定义范围…", self.pick_custom); action.setCheckable(True); action.setChecked(chosen == "custom")
+        menu.exec(self.more_range.mapToGlobal(self.more_range.rect().bottomLeft()))
+
+    def pick_custom(self):
+        first, last = self.analysis_dates()
+        recorded = sorted(self.streak_cache.get("totals", {}))
+        dialog = RangeDialog(self, first, last, recorded[0] if recorded else None)
+        if dialog.exec() == QDialog.DialogCode.Accepted: self.choose_custom("custom", *dialog.values())
+
+    def choose_custom(self, kind, first="", last=""):
+        self.analysis_day = None; self.analysis_custom = (kind, first, last)
+        self.range_combo.clearSelection(); self.refresh_analysis()
+        self.analysis_view.verticalScrollBar().setValue(0); fade_in(self.analysis_view.widget())
 
     def analysis_dates(self):
         count, back = self.analysis_span()
@@ -858,20 +1103,22 @@ class App(Shell):
         return f"{a.month}月{a.day}日 – {b.month}月{b.day}日"
 
     def choose_range(self):
-        """A range segment was clicked: leave the single-day view."""
-        self.analysis_day = None; self.refresh_analysis()
+        """A range segment was clicked: leave the single-day view and any range from the 更多 menu."""
+        self.analysis_day = None; self.analysis_custom = None; self.refresh_analysis()
 
-    def show_analysis_day(self, day):
+    def show_analysis_day(self, day, keep_scroll=False):
         """Analyse one day (from the calendar, a bar or the daily table)."""
         if not day or day > datetime.now().date().isoformat(): return
         presets = {datetime.now().date().isoformat(): 0, (datetime.now().date()-timedelta(days=1)).isoformat(): 1}
+        self.analysis_custom = None
         if day in presets:  # 今天 / 昨天 have their own segment
             self.analysis_day = None; self.range_combo.blockSignals(True); self.range_combo.setCurrentIndex(presets[day]); self.range_combo.blockSignals(False)
         else:
             self.analysis_day = day; self.range_combo.clearSelection()
         if self.pages.currentIndex() != 1: self.navigate(1)
         else: self.refresh_analysis()
-        self.analysis_view.verticalScrollBar().setValue(0); fade_in(self.analysis_view.widget())
+        if not keep_scroll or self.pages.currentIndex() != 1: self.analysis_view.verticalScrollBar().setValue(0)
+        self.analysis_view.horizontalScrollBar().setValue(0)
 
     def shift_analysis_day(self, step):
         day = datetime.fromisoformat(self.analysis_day or self.analysis_dates()[1]).date()+timedelta(days=step)
@@ -901,8 +1148,13 @@ class App(Shell):
         self.day_box.setVisible(bool(self.analysis_day)); self.day_detail.setVisible(single)
         if self.analysis_day:
             self.day_label.setText(self.day_name(self.analysis_day)); self.day_next.setEnabled(last < today)
-        set_text(self.range_note, ("" if self.analysis_day else self.range_name(first_day, last_day)+" · ") +
-                 ("当天没有记录" if single and not active else "" if single else f"{count} 天中 {len(active)} 天有记录"))
+        custom = self.analysis_custom
+        self.more_range.setChecked(bool(custom)); set_text(self.more_range, self.RANGE_NAMES.get(custom[0], "自定义") if custom else "更多")
+        parts = [] if self.analysis_day else [self.range_name(first_day, last_day)]
+        if single and not active: parts.append("当天没有记录")
+        elif not single: parts.append(f"{count} 天中 {len(active)} 天有记录")
+        set_text(self.range_note, " · ".join(parts))
+        self.range_note.setToolTip(self.range_note.text()); self.fit_analysis_controls()
 
         # KPIs
         ratio = self.focus_of(summed); present = sum(v for k, v in summed.items() if k != "idle")
@@ -1006,7 +1258,9 @@ class App(Shell):
                 diff = now[key]-before[key] if has_before and (now[key] or before[key]) else None
                 good = None if diff is None or abs(diff) < 60 else {"work": diff > 0, "distraction": diff < 0}.get(key)
                 set_text(change, "—" if diff is None else "持平" if abs(diff) < 60 else f"{'↑' if diff > 0 else '↓'} {short_time(abs(diff))}")
-            restyle(change, f"color:{SUBTLE if good is None else TEXTS['work'] if good else P['danger']};")
+            colour = SUBTLE if good is None else TEXTS["work"] if good else P["danger"]
+            restyle(change, f"color:{colour};padding:2px 0;" if good is None else
+                    f"color:{colour};background:{tint(colour)};border-radius:9px;padding:2px 9px;")
         a, b = before_first, before_last
         set_text(self.compare_note, (f"上一段：{self.range_name(a.isoformat(), b.isoformat())}。绿色是变好，红色是变差。") if has_before else
                  "上一段时间没有记录，暂时无法比较。")
@@ -1052,7 +1306,10 @@ class App(Shell):
         self.session_table.setFixedHeight(self.session_table.horizontalHeader().height()+40*len(rows)+4)
 
     # ── activity management ───────────────────────────────────────────
-    def open_manager(self, category="", day=None, query=""):
+    def open_manager(self, category="", day=None, query="", timed=None):
+        if timed is not None and timed != self.manager_timed():  # e.g. from the minute timeline: show when it happened
+            self.manager_view.blockSignals(True); self.manager_view.setCurrentIndex(1 if timed else 0); self.manager_view.blockSignals(False)
+            self.switch_manager_view()
         for widget, apply in [(self.manage_date, lambda: self.manage_date.setDate(QDate.fromString(day or datetime.now().date().isoformat(), "yyyy-MM-dd"))),
                               (self.category_filter, lambda: self.category_filter.setCurrentIndex(max(0, self.category_filter.findData(category)))),
                               (self.search, lambda: self.search.setText(query))]:
@@ -1066,23 +1323,49 @@ class App(Shell):
             if item: result.append(tuple(item.data(Qt.ItemDataRole.UserRole)))
         return result
 
+    def manager_timed(self):
+        return self.manager_view.currentData() == "time"
+
+    def switch_manager_view(self, _=None):
+        """按应用 / 按时间: the same table with other columns."""
+        timed = self.manager_timed(); header = self.table.horizontalHeader()
+        self.table.clearSelection(); self.table.setRowCount(0)
+        self.table.setHorizontalHeaderLabels(["分类", "时间", "应用", "网站", "时长"] if timed else ["分类", "应用", "网站", "累计时长", "占当日"])
+        for column, width in enumerate([110, 150, 0, 0, 110] if timed else [110, 0, 0, 110, 90]):
+            header.setSectionResizeMode(column, header.ResizeMode.Fixed if width else header.ResizeMode.Stretch)
+            if width: self.table.setColumnWidth(column, width)
+        self.change_future.setVisible(not timed)  # a stretch is a one-off fix, never a rule
+        set_text(self.manager_hint, "每分钟归给占时最多的那一项 · 选中后“设为”只改这一段" if timed else "Ctrl / Shift 多选 · 右键更多操作 · 双击调整以后的规则")
+        self.manager_signature = None; self.manager_shown = None; self.refresh_manager(force=True)
+
+    def records_changed(self):
+        """Recorded time was edited: drop everything cached from it."""
+        self.manager_signature = None; self.compare = {}; self.streak_cache = {}; self.rhythm_cache = (None, None)
+
+    def manager_values(self, row, total):
+        cat, app, host, seconds, first, last = row
+        name = app_name(app) or "离开 / 锁屏"; site = site_name(host) or "—"
+        if first is None:
+            return [CATEGORIES[cat], name, site, duration(seconds), f"{seconds/total:.1%}" if total else "—"]
+        clock = lambda minute: f"{minute//60:02d}:{minute % 60:02d}"
+        return [CATEGORIES[cat], f"{clock(first)} – {clock(last+1)}", name, site, duration(seconds)]
+
     def refresh_manager(self, force=False):
         day = self.manage_date.date().toString("yyyy-MM-dd"); query = self.search.text().strip().lower(); category = self.category_filter.currentData()
-        rows = []
-        for row in self.store.details(day):
-            cat, app, host, seconds = row
-            if category and cat != category: continue
-            if query and query not in f"{app} {host} {app_name(app)} {site_name(host)}".lower(): continue
-            rows.append(row)
+        timed = self.manager_timed()
+        # One shape for both views: (category, app, host, seconds, first minute, last minute); the last two are None per app.
+        found = [(c, a, h, s, f, l) for f, l, c, a, h, s in self.store.segments(day)] if timed else [(*row, None, None) for row in self.store.details(day)]
+        rows = [row for row in found if (not category or row[0] == category)
+                and (not query or query in f"{row[1]} {row[2]} {app_name(row[1])} {site_name(row[2])}".lower())]
         total = sum(self.store.totals(day).values())
-        keys = tuple((c, a, h) for c, a, h, _ in rows)
-        signature = (day, query, category, keys)
+        keys = tuple((c, a, h, f, l) for c, a, h, _, f, l in rows)
+        signature = (day, query, category, timed, keys)
         if not force and signature == self.manager_signature:
-            # Same rows in the same order: update only the changing time cells.
-            for index, (_, _, _, seconds) in enumerate(rows):
-                for column, value in ((3, duration(seconds)), (4, f"{seconds/total:.1%}" if total else "—")):
+            # Same rows in the same order: update only the cells whose text changed.
+            for index, row in enumerate(rows):
+                for column, value in enumerate(self.manager_values(row, total)):
                     item = self.table.item(index, column)
-                    if item.text() != value: item.setText(value)
+                    if column and item.text() != value: item.setText(value)
             self.manager_rows = rows
             self.undo_button.setEnabled(self.store.can_undo())
             return
@@ -1090,27 +1373,52 @@ class App(Shell):
         selected = set(self.selected_keys()); scroll = self.table.verticalScrollBar().value()
         self.table.setUpdatesEnabled(False); self.table.blockSignals(True)
         self.table.clearSelection(); self.table.setRowCount(len(rows)); self.manager_rows = rows
-        selection = self.table.selectionModel()
-        for row, (cat, app, host, seconds) in enumerate(rows):
-            values = [CATEGORIES[cat], app_name(app) or "离开 / 锁屏", site_name(host) or "—", duration(seconds), f"{seconds/total:.1%}" if total else "—"]
-            for column, value in enumerate(values):
+        selection = self.table.selectionModel(); app_column = 2 if timed else 1
+        for index, row in enumerate(rows):
+            cat, app, host, _, first, last = row
+            key = (cat, app, host, first, last) if timed else (cat, app, host)
+            for column, value in enumerate(self.manager_values(row, total)):
                 item = QTableWidgetItem(value)
                 if column == 0:
-                    item.setData(Qt.ItemDataRole.UserRole, (cat, app, host)); item.setData(CategoryDelegate.ROLE, cat)
-                elif column == 1:
+                    item.setData(Qt.ItemDataRole.UserRole, key); item.setData(CategoryDelegate.ROLE, cat)
+                elif column == app_column:
                     item.setToolTip(app or "离开 / 锁屏")
                     if app: item.setIcon(appicons.icon_for(app, cat))
-                elif column == 2 and host: item.setToolTip(host); item.setIcon(appicons.icon_for(host, cat))
-                self.table.setItem(row, column, item)
-            if (cat, app, host) in selected:
-                selection.select(self.table.model().index(row, 0), selection.SelectionFlag.Select | selection.SelectionFlag.Rows)
+                elif column == app_column+1 and host: item.setToolTip(host); item.setIcon(appicons.icon_for(host, cat))
+                self.table.setItem(index, column, item)
+            if key in selected:
+                selection.select(self.table.model().index(index, 0), selection.SelectionFlag.Select | selection.SelectionFlag.Rows)
         self.table.blockSignals(False); self.table.setUpdatesEnabled(True); self.table.verticalScrollBar().setValue(scroll)
         self.table.setVisible(bool(rows)); self.empty_label.setVisible(not rows); self.selection_changed()
         shown = sum(r[3] for r in rows)
-        summary = f"共 {len(rows)} 项 · 合计 {short_time(shown)}" + (f"（当天全部 {short_time(total)}）" if shown < total-1 else "")
+        summary = f"共 {len(rows)} {'段' if timed else '项'} · 合计 {short_time(shown)}" + (f"（当天全部 {short_time(total)}）" if not timed and shown < total-1 else "")
         set_text(self.manager_total, summary if rows else "")
         is_today = self.manage_date.date() >= QDate.currentDate()
         self.next_day.setEnabled(not is_today); self.today_button.setEnabled(not is_today)
+        self.manual_button.setEnabled(self.manage_date.date() <= QDate.currentDate())
+        # The day in order ends with what just happened: open today's list at its end.
+        if timed and getattr(self, "manager_shown", None) != (day, timed) and is_today: QTimer.singleShot(0, self.table.scrollToBottom)
+        self.manager_shown = (day, timed)
+
+    def add_manual(self):
+        """补记时间: enter a stretch of the shown day by hand."""
+        day = self.manage_date.date().toString("yyyy-MM-dd"); now = datetime.now()
+        today = day == now.date().isoformat(); latest = now.hour*60+now.minute if today else 1439
+        # Start from an away stretch selected in 按时间, else from the hour that just passed (noon on other days).
+        chosen = next((key for key in self.selected_keys() if len(key) == 5 and key[0] == "idle" and not key[1]), None)
+        if chosen: begin, end = chosen[3], min(1439, chosen[4]+1)
+        else:
+            end = latest if today else 12*60; end -= end % 5; begin = max(0, end-60)
+        dialog = ManualDialog(self, day, begin, end, latest)
+        if dialog.exec() != QDialog.DialogCode.Accepted: return
+        begin, end, category, name = dialog.values(); base = datetime.fromisoformat(day)
+        self.settle()
+        seconds = self.store.add_manual(base+timedelta(minutes=begin), base+timedelta(minutes=end), category, name)
+        self.records_changed(); self.refresh(force=True)
+        if seconds < 1:
+            self.notify("这段时间已经记满了，没有可补的空白。想改其中一段，切到“按时间”选中它再设分类。", seconds=8)
+        else:
+            self.notify(f"已补记 {short_time(seconds)}，记为{LABELS[category]}", self.undo_correction, seconds=8)
 
     def shift_day(self, days):
         self.manage_date.setDate(self.manage_date.date().addDays(days))
@@ -1127,9 +1435,12 @@ class App(Shell):
     def apply_classification(self, target):
         keys = self.selected_keys()
         if not keys: return
-        self.settle()
-        count = self.store.reclassify(self.manage_date.date().toString("yyyy-MM-dd"), keys, target)
-        remember = self.change_future.isChecked()
+        self.settle(); day = self.manage_date.date().toString("yyyy-MM-dd"); timed = self.manager_timed()
+        if timed:  # only the selected stretches; never a rule
+            count = self.store.reclassify_span(day, [(first, last, cat, app, host) for cat, app, host, first, last in keys], target)
+        else:
+            count = self.store.reclassify(day, keys, target)
+        remember = self.change_future.isChecked() and not timed
         if remember:
             for _, app, host in keys:
                 if host: self.config["host_rules"][host] = target
@@ -1137,18 +1448,18 @@ class App(Shell):
                 elif app == "专注时间助手.exe": self.config["own_window"] = target; self.own_combo.setCurrentIndex(max(0, self.own_combo.findData(target)))
                 elif app: self.config["app_rules"][app] = target
             save_config(self.config_path, self.config)
-        self.manager_signature = None; self.refresh_manager(force=True)
-        undo = self.undo_correction if count else None
+        self.records_changed(); self.refresh_manager(force=True)
+        undo = self.undo_correction if count else None; unit = "段" if timed else "条记录"
         if target == IGNORE:
-            self.notify(f"已移除 {count} 条记录的时间" + ("，以后也不再计时" if remember else ""), undo)
+            self.notify(f"已移除 {count} {unit}的时间" + ("，以后也不再计时" if remember else ""), undo)
         else:
-            self.notify(f"已设为{LABELS[target]}：修正 {count} 条记录" + ("，以后也这样记录" if remember else ""), undo)
+            self.notify(f"已设为{LABELS[target]}：修正 {count} {unit}" + ("，以后也这样记录" if remember else "（只改这几段，规则不变）" if timed else ""), undo)
         self.resample_without_charge()
 
     def undo_correction(self):
         self.settle()
         if self.store.undo(): self.notify("已撤销上次记录修正；分类规则保持不变。")
-        self.manager_signature = None; self.refresh_manager(force=True)
+        self.records_changed(); self.refresh(force=True)
 
     def row_menu(self, position):
         if not self.selected_keys(): return
@@ -1159,7 +1470,7 @@ class App(Shell):
         menu.addSeparator(); menu.addAction("调整以后的分类规则…", lambda: self.rule_for_row(self.table.currentRow()))
         row = self.table.currentRow()
         if 0 <= row < len(self.manager_rows) and (self.manager_rows[row][2] or self.manager_rows[row][1].endswith(".exe")):
-            _, app, host, _ = self.manager_rows[row]
+            app, host = self.manager_rows[row][1:3]
             menu.addAction(icon("target", ACCENT, 16), f"设置“{label(app, host)}”每日上限…", lambda k=host or app: self.set_app_limit(k))
             if app.endswith(".exe"): menu.addAction("给应用改名…", lambda a=app: self.rename_app(a))
             if host: menu.addAction("给网站改名…", lambda h=host: self.rename_site(h))
@@ -1195,9 +1506,9 @@ class App(Shell):
 
     def rule_for_row(self, row):
         if not 0 <= row < len(self.manager_rows): return
-        cat, app, host, _ = self.manager_rows[row]
-        if not (app or host) or app == AWAY_LABEL:
-            self.notify("离开时间没有对应的程序，用上方的“设为”按钮或右键就能改分类。"); return
+        cat, app, host = self.manager_rows[row][:3]
+        if not (app or host) or app.endswith(MANUAL_MARK):
+            self.notify("离开和补记的时间没有对应的程序，用上方的“设为”按钮或右键就能改分类。"); return
         self.show_rule(host or app, bool(host), cat)
 
     def show_rule(self, key="", domain=False, category="work"):

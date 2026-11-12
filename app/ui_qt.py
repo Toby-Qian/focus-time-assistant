@@ -1,8 +1,8 @@
 """Window layout: sidebar, five pages and reusable widgets. Behaviour lives in desktop.App."""
 from PySide6.QtCore import Qt, QDate, QEasingCurve, QEvent, QObject, QPoint, QPointF, QPropertyAnimation, QRectF, QSize, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPen
-from PySide6.QtWidgets import (QMainWindow, QWidget, QFrame, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
-    QGridLayout, QStackedWidget, QScrollArea, QLineEdit, QComboBox, QDateEdit, QSpinBox, QTableWidget, QHeaderView,
+from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPen
+from PySide6.QtWidgets import (QMainWindow, QWidget, QFrame, QLabel, QPushButton, QVBoxLayout, QHBoxLayout, QToolTip,
+    QGridLayout, QBoxLayout, QStackedWidget, QScrollArea, QLineEdit, QComboBox, QDateEdit, QSpinBox, QTableWidget, QHeaderView,
     QAbstractItemView, QCheckBox, QButtonGroup, QStyledItemDelegate, QStyle, QStyleOptionViewItem, QApplication, QSizePolicy, QGraphicsOpacityEffect)
 
 
@@ -18,7 +18,7 @@ from core import CATEGORIES, EXPORT_PARTS, LABELS, OWN_WINDOW_MODES, RULE_TARGET
 from theme import ACCENT, COLORS, MUTED, INK, P, TEXTS, THEME, THEMES, TINTS, icon, font
 import windows
 import theme
-from charts import Donut, Heatmap, StackedBars, RankList, Timeline
+from charts import Donut, Heatmap, StackedBars, RankList, Timeline, hide_tooltip
 
 PAGES = [("今日总览", "overview", "今天的专注", "实时记录今天的投入、分心与离开。"),
          ("时间分析", "chart", "时间分析", "选一段时间看投入、分心和节奏；点日历或柱子分析某一天。"),
@@ -56,7 +56,9 @@ class KeyboardFocusRing(QObject):
 
     def eventFilter(self, obj, event):
         kind = event.type()
-        if kind == QEvent.Type.FocusIn:
+        if kind == QEvent.Type.Leave:
+            if QToolTip.isVisible(): hide_tooltip()  # no lingering pop-up once the pointer has left
+        elif kind == QEvent.Type.FocusIn:
             self.mark(obj, event.reason() in self.KEYS)
         elif kind == QEvent.Type.FocusOut:
             self.mark(obj, False)
@@ -115,6 +117,27 @@ def card(title=None, name="card", margins=(20, 18, 20, 18), spacing=12, kind=Non
     return frame, layout
 
 
+class ScrollFade(QWidget):
+    """A soft fade over the bottom edge of a scrolling page while more is below, so a card cut by
+    the window edge fades out instead of ending in a hard, cornerless line."""
+    HEIGHT = 30
+
+    def __init__(self, area):
+        super().__init__(area.viewport()); self.area = area
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        area.verticalScrollBar().valueChanged.connect(self.follow); area.verticalScrollBar().rangeChanged.connect(self.follow)
+        ResizeWatch(area.viewport(), self.follow)
+
+    def follow(self, *_):
+        view = self.area.viewport(); bar = self.area.verticalScrollBar()
+        self.setGeometry(0, view.height()-self.HEIGHT, view.width()-10, self.HEIGHT)  # 10 px: the page's right margin
+        self.setVisible(bar.value() < bar.maximum()); self.raise_()
+
+    def paintEvent(self, _):
+        p = QPainter(self); fade = QLinearGradient(0, 0, 0, self.height()); clear = QColor(P["bg"]); clear.setAlpha(0)
+        fade.setColorAt(0, clear); fade.setColorAt(1, QColor(P["bg"])); p.fillRect(self.rect(), fade)
+
+
 def page(scroll=True):
     content = QWidget(); content.setObjectName("canvas")
     layout = QVBoxLayout(content); layout.setContentsMargins(0, 0, 10 if scroll else 0, 4); layout.setSpacing(14)
@@ -122,6 +145,7 @@ def page(scroll=True):
         return content, layout
     area = QScrollArea(); area.setWidgetResizable(True); area.setWidget(content)
     area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    area.fade = ScrollFade(area)
     return area, layout
 
 
@@ -203,6 +227,16 @@ class Segmented(QFrame):
         checked = self.group.checkedButton()
         if checked:
             self.group.setExclusive(False); checked.setChecked(False); self.group.setExclusive(True)
+
+
+class ResizeWatch(QObject):
+    """Calls back when a widget changes size (used to fit a crowded toolbar to the page width)."""
+    def __init__(self, widget, callback):
+        super().__init__(widget); self.callback = callback; widget.installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.Resize: self.callback()
+        return False
 
 
 class Toast(QFrame):
@@ -333,7 +367,7 @@ def legend():
 class Shell(QMainWindow):
     def build(self):
         self.setWindowTitle("专注时间助手")
-        self.resize(1240, 820); self.setMinimumSize(980, 660)
+        self.resize(self.default_size()); self.setMinimumSize(980, 660)
         canvas = QWidget(); canvas.setObjectName("canvas"); self.setCentralWidget(canvas)
         columns = QHBoxLayout(canvas); columns.setContentsMargins(0, 0, 0, 0); columns.setSpacing(0)
         columns.addWidget(self.build_sidebar())
@@ -354,6 +388,19 @@ class Shell(QMainWindow):
         # Buttons take focus from Tab only: a mouse click leaves no ring, keyboard users always see one.
         for b in self.findChildren(QPushButton): b.setFocusPolicy(Qt.FocusPolicy.TabFocus)
         self.focus_ring = KeyboardFocusRing(self); QApplication.instance().installEventFilter(self.focus_ring)
+
+    OLD_DEFAULT = QSize(1240, 820)  # the size every window had before 1.1; treated as "never resized"
+
+    def default_size(self):
+        """Large enough that the overview and the top of the analysis fit without cut cards, but
+        never more than most of the screen."""
+        area = (self.screen() or QApplication.primaryScreen()).availableGeometry()
+        return QSize(min(1360, round(area.width()*.86)), min(940, round(area.height()*.9)))
+
+    def place_default(self):
+        self.resize(self.default_size())
+        area = (self.screen() or QApplication.primaryScreen()).availableGeometry()
+        self.move(area.center().x()-self.frameGeometry().width()//2, area.center().y()-self.frameGeometry().height()//2)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -442,7 +489,7 @@ class Shell(QMainWindow):
         head.addStretch(); rl.addLayout(head)
         self.rhythm_stack = QStackedWidget()
         self.hour_chart = StackedBars(hourly=True); self.rhythm_stack.addWidget(self.hour_chart)
-        self.timeline = Timeline(); self.timeline.chosen.connect(lambda query: self.open_manager(query=query)); self.rhythm_stack.addWidget(self.timeline)
+        self.timeline = Timeline(); self.timeline.chosen.connect(lambda query: self.open_manager(query=query, timed=True)); self.rhythm_stack.addWidget(self.timeline)
         self.rhythm_mode.currentIndexChanged.connect(self.switch_rhythm)
         rl.addWidget(self.rhythm_stack, 1)
         foot = legend(); foot.addStretch()
@@ -482,13 +529,14 @@ class Shell(QMainWindow):
         panel, inside = card()
         head = heading("专注日历", "calendar"); head.addSpacing(6); head.addWidget(text("点任意一天单独分析", "small")); head.addStretch(); self.streak_label = text("", "muted"); head.addWidget(self.streak_label)
         inside.addLayout(head)
-        self.heatmap = Heatmap(); self.heatmap.chosen.connect(self.show_analysis_day); inside.addWidget(self.heatmap)
+        # Picked in the calendar itself: the page stays where it is instead of jumping.
+        self.heatmap = Heatmap(); self.heatmap.chosen.connect(lambda day: self.show_analysis_day(day, keep_scroll=True)); inside.addWidget(self.heatmap)
         layout.addWidget(panel)
 
         controls = QHBoxLayout(); controls.setSpacing(10)
         # (number of days, days back from today to the last one): 昨天 ends yesterday, the rest end today.
-        self.range_combo = Segmented([("今天", (1, 0)), ("昨天", (1, 1)), ("最近 3 天", (3, 0)), ("最近 7 天", (7, 0)), ("最近 30 天", (30, 0))])
-        self.range_combo.setCurrentIndex(3)
+        self.range_combo = Segmented([("今天", (1, 0)), ("昨天", (1, 1)), ("近 3 天", (3, 0)), ("近 7 天", (7, 0)), ("近 30 天", (30, 0))])
+        self.range_combo.setCurrentIndex(0)  # opens on today
         self.range_combo.currentIndexChanged.connect(lambda _: self.choose_range()); controls.addWidget(self.range_combo)
         # One day picked from the calendar, a bar or the daily table: ‹ 11月3日 周二 ›
         self.day_box = QFrame(); self.day_box.setObjectName("segmented")
@@ -503,14 +551,24 @@ class Shell(QMainWindow):
         self.day_prev.clicked.connect(lambda: self.shift_analysis_day(-1)); self.day_next.clicked.connect(lambda: self.shift_analysis_day(1))
         self.day_label.clicked.connect(lambda: self.day_label.setChecked(True))
         self.day_box.hide(); controls.addWidget(self.day_box)
-        self.range_note = text("", "muted"); controls.addSpacing(4); controls.addWidget(self.range_note)
-        controls.addStretch()
-        self.day_detail = button("查看当天活动", lambda: self.open_manager(day=self.analysis_day), kind="list")
+        # 本周 / 上周 / 本月 / 上月 / 自定义: one more pill that opens a menu and shows what was picked.
+        box = QFrame(); box.setObjectName("segmented")
+        row = QHBoxLayout(box); row.setContentsMargins(3, 3, 3, 3)
+        self.more_range = QPushButton("更多"); self.more_range.setProperty("role", "segment"); self.more_range.setCheckable(True)
+        self.more_range.setCursor(Qt.CursorShape.PointingHandCursor); self.more_range.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        self.more_range.setIcon(icon("down", MUTED, 12)); self.more_range.setIconSize(QSize(12, 12))
+        self.more_range.setToolTip("本周、上周、本月、上月，或自己选起止日期")
+        self.more_range.clicked.connect(self.range_menu); row.addWidget(self.more_range); controls.addWidget(box); self.more_box = box
+        self.range_note = text("", "muted"); self.range_note.setMinimumWidth(1)  # gives way first in a narrow window
+        controls.addSpacing(4); controls.addWidget(self.range_note, 1)
+        self.day_detail = button("当天明细", lambda: self.open_manager(day=self.analysis_last), kind="list")
         self.day_detail.setToolTip("在活动管理里查看、修改这一天的每条记录"); self.day_detail.hide(); controls.addWidget(self.day_detail)
-        self.export_button = button("导出分析报告", self.export_menu, True, kind="report")
-        self.export_button.setToolTip("导出当前范围，或今天、最近 7 天、最近 30 天；格式和内容在“规则与设置 → 分析与导出”里设置")
+        self.export_button = button("导出报告", self.export_menu, True, kind="report")
+        self.export_button.setToolTip("导出分析报告：当前范围，或今天、最近 7 天、最近 30 天；格式和内容在“规则与设置 → 分析与导出”里设置")
         controls.addWidget(self.export_button)
-        layout.addLayout(controls)
+        layout.addLayout(controls); self.analysis_controls = controls
+        # The row must never be wider than the page: a wider row made the whole page slide sideways.
+        self.analysis_watch = ResizeWatch(view.viewport(), self.fit_analysis_controls)
 
         tiles = QHBoxLayout(); tiles.setSpacing(12)
         self.kpis = {"work": kpi("工作", tiles, "work"), "distraction": kpi("摸鱼", tiles, "distraction"),
@@ -553,15 +611,22 @@ class Shell(QMainWindow):
             name = text(("● " if key in CATEGORIES else "")+title); name.setStyleSheet(f"color:{TEXTS[key] if key in CATEGORIES else INK};font-size:14px;")
             grid.addWidget(name, index, 0); cells = []
             for col in (1, 2, 3):
-                cell = text("—", None if col != 2 else "muted"); cell.setFont(font(13, QFont.Weight.DemiBold if col == 1 else QFont.Weight.Normal, "num"))
-                cell.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter); grid.addWidget(cell, index, col); cells.append(cell)
+                cell = text("—", None if col != 2 else "muted")
+                cell.setFont(font(15 if col == 3 else 14 if col == 1 else 13, QFont.Weight.DemiBold if col != 2 else QFont.Weight.Normal, "num"))
+                cell.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                if col == 3:  # a pill that hugs its text
+                    cell.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+                    grid.addWidget(cell, index, col, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                else: grid.addWidget(cell, index, col)
+                cells.append(cell)
             self.compare_cells[key] = cells
         # Spread the three number columns evenly instead of packing them against the right edge.
         grid.setColumnStretch(0, 3)
         for col in (1, 2, 3): grid.setColumnStretch(col, 2); grid.setColumnMinimumWidth(col, 72)
+        grid.setColumnMinimumWidth(3, 96)
         inside.addLayout(grid)
         self.compare_note = text("", "small", wrap=True); inside.addWidget(self.compare_note); inside.addStretch()
-        pair.addWidget(panel, 1); layout.addLayout(pair)
+        pair.addWidget(panel, 1); layout.addLayout(pair); self.analysis_pair = pair
 
         self.trend_card, inside = card()
         head = heading("每日时间", "chart"); head.addStretch(); head.addLayout(legend()); inside.addLayout(head)
@@ -608,6 +673,27 @@ class Shell(QMainWindow):
         layout.addWidget(panel)
         self.pages.addWidget(view)
 
+    def fit_analysis_controls(self):
+        """Full button texts when they fit, icons only (text in the tooltip) when the page is narrow."""
+        available = self.analysis_view.viewport().width()-10  # the page keeps 10 px for its scroll bar
+        changed = []
+        # 0: everything; 1: the two buttons as icons; 2: also without 更多 (a range segment brings it back).
+        for stage in (0, 1, 2):
+            compact = stage > 0
+            for b, label, role in ((self.day_detail, "当天明细", None), (self.export_button, "导出报告", "primary")):
+                wanted = "" if compact else label
+                if b.text() != wanted:
+                    b.setText(wanted); b.setProperty("role", "icon" if compact and not role else role); changed.append(b)
+            self.more_box.setVisible(stage < 2 or bool(self.analysis_custom))
+            self.analysis_controls.invalidate()
+            if self.analysis_controls.minimumSize().width() <= available: break
+        for b in set(changed): b.style().unpolish(b); b.style().polish(b)
+        # 时间构成 | 和上一段比 side by side when both fit, else one above the other.
+        pair = self.analysis_pair; cards = [pair.itemAt(i).widget() for i in range(pair.count())]
+        side = sum(c.minimumSizeHint().width() for c in cards)+pair.spacing()*(len(cards)-1) <= available
+        wanted = QBoxLayout.Direction.LeftToRight if side else QBoxLayout.Direction.TopToBottom
+        if pair.direction() != wanted: pair.setDirection(wanted)
+
     def stat_columns(self, inside, items):
         """A row of figures: label, big value, a short wrapped note; returns {key: (value, note)}."""
         row = QHBoxLayout(); row.setSpacing(0); cells = {}
@@ -637,13 +723,20 @@ class Shell(QMainWindow):
         controls.addSpacing(6)
         self.search = QLineEdit(); self.search.setPlaceholderText("搜索应用或网站（Ctrl+F）"); self.search.setClearButtonEnabled(True)
         self.search.textChanged.connect(lambda _: self.refresh_manager(force=True)); controls.addWidget(self.search, 1)
+        self.manual_button = button("补记时间", self.add_manual, kind="pen")
+        self.manual_button.setToolTip("补上电脑没记到的一段：开会、上课、看纸质资料……")
+        controls.addWidget(self.manual_button)
         controls.addWidget(button("导出当天", self.export_day, kind="export")); layout.addLayout(controls)
 
         panel, inside = card(spacing=10)
         filters = QHBoxLayout(); filters.setSpacing(10)
         self.category_filter = Segmented([("全部", "")]+[(title, key) for key, title in CATEGORIES.items()])
         self.category_filter.currentIndexChanged.connect(lambda _: self.refresh_manager(force=True)); filters.addWidget(self.category_filter)
-        filters.addStretch(); self.manager_total = text("", "small"); filters.addWidget(self.manager_total)
+        filters.addStretch()
+        # 按应用: one row per program / site with the day's total. 按时间: the day in order, one row per stretch.
+        self.manager_view = Segmented([("按应用", "apps"), ("按时间", "time")])
+        self.manager_view.setToolTip("按应用：每个应用 / 网站当天的合计。\n按时间：按先后顺序列出每一段，可以只改其中一段的分类。")
+        self.manager_view.currentIndexChanged.connect(self.switch_manager_view); filters.addWidget(self.manager_view)
         inside.addLayout(filters)
         actions = QHBoxLayout(); actions.setSpacing(6)
         self.selection_label = text("", "muted"); self.selection_label.setMinimumWidth(118); actions.addWidget(self.selection_label)
@@ -667,6 +760,9 @@ class Shell(QMainWindow):
         inside.addWidget(self.table, 1)
         self.empty_label = EmptyState("search", "这一天没有符合条件的记录", "换个日期、分类或搜索词试试")
         self.empty_label.hide(); inside.addWidget(self.empty_label, 1)
+        foot = QHBoxLayout(); foot.setSpacing(10)
+        self.manager_total = text("", "small"); foot.addWidget(self.manager_total); foot.addStretch()
+        self.manager_hint = text("", "small"); foot.addWidget(self.manager_hint); inside.addLayout(foot)
         layout.addWidget(panel, 1); self.pages.addWidget(view)
 
     def spin(self, low, high, value, suffix, step=1, off=None, tip=""):
@@ -690,7 +786,14 @@ class Shell(QMainWindow):
         grid.setColumnStretch(1, 1); layout.addLayout(grid)
 
     def build_settings(self):
-        view, layout = page()
+        # Two tabs: preferences (scrolls) and the rule table (fills the page, like 活动管理).
+        view, outer = page(scroll=False)
+        tabs = QHBoxLayout(); tabs.setSpacing(12)
+        self.settings_tab = Segmented([("偏好设置", "prefs"), ("分类规则", "rules")])
+        self.settings_tab.currentIndexChanged.connect(self.switch_settings); tabs.addWidget(self.settings_tab)
+        self.settings_note = text("", "small"); tabs.addWidget(self.settings_note); tabs.addStretch(); outer.addLayout(tabs)
+        self.settings_stack = QStackedWidget(); outer.addWidget(self.settings_stack, 1)
+        prefs, layout = page(); self.settings_stack.addWidget(prefs)
         c = self.config
         cards = QHBoxLayout(); cards.setSpacing(12)
         panel, inside = card("提醒与记录", spacing=10, kind="bell")
@@ -766,9 +869,10 @@ class Shell(QMainWindow):
             box = self.check(label, key in c["export_parts"]); self.export_checks[key] = box; parts.addWidget(box, index//2, index % 2)
         holder = QWidget(); holder.setLayout(parts)
         data_row = QHBoxLayout(); data_row.setSpacing(8)
-        data_row.addWidget(button("备份数据…", self.backup_data, kind="export")); data_row.addWidget(button("打开数据文件夹", self.open_data_folder, kind="folder"))
+        data_row.addWidget(button("备份…", self.backup_data, kind="export")); data_row.addWidget(button("恢复…", self.restore_data, kind="import"))
+        data_row.addWidget(button("打开文件夹", self.open_data_folder, kind="folder"))
         data_box = QWidget(); data_box.setLayout(data_row); data_row.setContentsMargins(0, 0, 0, 0)
-        data_box.setToolTip("备份是一份完整的记录数据库，换电脑或重装后可以交给本程序恢复")
+        data_box.setToolTip("备份：把全部记录另存成一个文件。\n恢复：用一份备份替换现在的记录（替换前会自动另存一份）。\n换电脑或重装时，先备份、再到新电脑上恢复。")
         self.away_combo = QComboBox(); self.away_combo.setFixedWidth(200)
         self.away_combo.addItem("计入离开时间", True); self.away_combo.addItem("只算在电脑前的时间", False)
         self.away_combo.setCurrentIndex(0 if c["overview_away"] else 1)
@@ -780,9 +884,10 @@ class Shell(QMainWindow):
         layout.addLayout(cards)
         tips = QFrame(); tips.setObjectName("note"); tip_row = QHBoxLayout(tips); tip_row.setContentsMargins(14, 10, 14, 10); tip_row.setSpacing(10)
         tip_row.addWidget(IconLabel(icon("bulb", ACCENT, 16), 16))
-        tip_row.addWidget(text("所有设置修改后自动保存；关闭窗口后在托盘继续记录。快捷键：Ctrl+1–5 切换页面 · Ctrl+Shift+F 专注 · "
-                               "Ctrl+P 暂停 · Ctrl+F 搜索", "small", wrap=True), 1)
-        layout.addWidget(tips)
+        tip_row.addWidget(text("关闭窗口后在托盘继续记录。快捷键：Ctrl+1–5 切换页面 · Ctrl+Shift+F 专注 · "
+                               "Ctrl+P 暂停 · Ctrl+F 搜索 · F5 刷新", "small", wrap=True), 1)
+        layout.addWidget(tips); layout.addStretch()
+        rules, layout = page(scroll=False); self.settings_stack.addWidget(rules)
         panel, inside = card()
         head = heading("分类规则", "rules"); self.rules_count = text("", "small"); head.addWidget(self.rules_count); head.addStretch()
         head.addWidget(button("添加规则", self.add_rule, True)); head.addWidget(button("编辑所选", self.edit_rule))
@@ -803,9 +908,19 @@ class Shell(QMainWindow):
         self.rules_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.rules_table.customContextMenuRequested.connect(lambda pos: self.rule_menu(self.rules_table.rowAt(pos.y()), self.rules_table.viewport().mapToGlobal(pos)))
         self.rules_table.cellClicked.connect(lambda row, col: col == 0 and self.rule_menu(row))
-        self.rules_table.cellDoubleClicked.connect(lambda row, col: col != 0 and self.edit_rule()); self.rules_table.setMinimumHeight(330)
+        self.rules_table.cellDoubleClicked.connect(lambda row, col: col != 0 and self.edit_rule())
         inside.addWidget(self.rules_table, 1)
         layout.addWidget(panel, 1); self.pages.addWidget(view)
+        self.switch_settings(0)
+
+    def switch_settings(self, index):
+        changed = index != self.settings_stack.currentIndex()
+        self.settings_stack.setCurrentIndex(index)
+        if self.settings_tab.currentIndex() != index:
+            self.settings_tab.blockSignals(True); self.settings_tab.setCurrentIndex(index); self.settings_tab.blockSignals(False)
+        self.settings_note.setText("修改后自动保存，马上生效。" if index == 0 else "决定每个应用、网站以后记成哪一类；已经记下的时间在“活动管理”里改。")
+        if changed and self.isVisible(): fade_in(self.settings_stack.currentWidget())
+        if index == 1 and hasattr(self, "store"): self.refresh_rules()
 
     def build_browser(self):
         view, layout = page()

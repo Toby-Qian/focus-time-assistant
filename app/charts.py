@@ -8,6 +8,14 @@ import math
 from PySide6.QtCore import Qt, QEasingCurve, QRectF, QVariantAnimation, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QWidget, QToolTip
+from PySide6.QtWidgets import QApplication
+
+
+def hide_tooltip():
+    """Hide the tooltip now. hide_tooltip() only starts a 300 ms timer, so a tip lingered
+    after the pointer had left; the tip itself is a top-level label Qt replaces on the next show."""
+    for widget in QApplication.topLevelWidgets():
+        if widget.objectName() == "qtooltip_label" and widget.isVisible(): widget.hide()
 from core import CATEGORIES
 from theme import ACCENT, COLORS, INK, LINE, MUTED, P, SUBTLE, font
 
@@ -148,7 +156,7 @@ class Donut(Grow, QWidget):
             total = sum(self.totals.values())
             QToolTip.showText(event.globalPosition().toPoint(), f"{CATEGORIES[key]} · {short_time(self.totals[key])} · {share(self.totals[key], total)}"+(f"\n{self.hint}" if self.hint else ""), self)
         else:
-            QToolTip.hideText()
+            hide_tooltip()
 
     def leaveEvent(self, _):
         if self.hover is not None:
@@ -260,7 +268,7 @@ class StackedBars(Grow, QWidget):
             detail = "\n".join(f"{CATEGORIES[k]}  {short_time(v)}" for k, v in totals.items() if v)
             QToolTip.showText(event.globalPosition().toPoint(), heading+"\n"+(detail or "未记录活动")+("" if self.hourly or not detail else "\n点击分析这一天"), self)
         else:
-            QToolTip.hideText()
+            hide_tooltip()
 
     def leaveEvent(self, _):
         if self.hover is not None:
@@ -344,7 +352,7 @@ class RankList(QWidget):
         if row:
             QToolTip.showText(event.globalPosition().toPoint(), f"{row[0]} · {CATEGORIES[row[2]]} · {short_time(row[3])}\n点击查看明细", self)
         else:
-            QToolTip.hideText()
+            hide_tooltip()
 
     def leaveEvent(self, _):
         self.tip = None
@@ -419,7 +427,7 @@ class Timeline(QWidget):
         found = self.entry(minute)
         self.setCursor(Qt.CursorShape.PointingHandCursor if found else Qt.CursorShape.ArrowCursor)
         if minute is None:
-            QToolTip.hideText(); return
+            hide_tooltip(); return
         clock = f"{minute//60:02d}:{minute%60:02d}"
         QToolTip.showText(event.globalPosition().toPoint(), f"{clock} · {found[2]} · {CATEGORIES[found[1]]}" if found else f"{clock} · 无记录", self)
 
@@ -584,7 +592,7 @@ class Heatmap(QWidget):
         self.update_cell(previous); self.update_cell(iso)
         self.setCursor(Qt.CursorShape.PointingHandCursor if found and self.recorded(iso) else Qt.CursorShape.ArrowCursor)
         if not found:
-            QToolTip.hideText(); return
+            hide_tooltip(); return
         day = found[1]; head = f"{day.month}月{day.day}日 周{'一二三四五六日'[day.weekday()]}"
         if not self.recorded(iso):
             body = "还没开始记录"
@@ -605,5 +613,5 @@ class Heatmap(QWidget):
         found = self.cell_at(event.position())
         if found and self.recorded(found[0]):
             # The page refreshes and scrolls after a click; drop the hover ring so it cannot linger.
-            previous, self.hover = self.hover, None; QToolTip.hideText(); self.update_cell(previous)
+            previous, self.hover = self.hover, None; hide_tooltip(); self.update_cell(previous)
             self.chosen.emit(found[0])

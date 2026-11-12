@@ -219,4 +219,42 @@ class ManagementTests(unittest.TestCase):
         self.assertTrue(self.store.undo()); self.assertEqual(self.store.totals(self.day)["unknown"],30)
 
 
+    def test_segments_join_neighbouring_minutes_of_the_same_thing(self):
+        at=datetime(2026,11,10,9,0)
+        self.store.add(at,at+timedelta(minutes=30),Activity("work","code.exe"))
+        self.store.add(at+timedelta(minutes=30),at+timedelta(minutes=40),Activity("distraction","chrome.exe","www.bilibili.com"))
+        self.store.add(at+timedelta(minutes=40),at+timedelta(minutes=60),Activity("work","code.exe"))
+        self.assertEqual(self.store.segments(self.day),[(540,569,"work","code.exe","",1800.0),
+            (570,579,"distraction","chrome.exe","www.bilibili.com",600.0),(580,599,"work","code.exe","",1200.0)])
+
+    def test_one_stretch_can_be_reclassified_and_undone(self):
+        at=datetime(2026,11,10,9,0)
+        self.store.add(at,at+timedelta(minutes=30),Activity("work","code.exe"))
+        self.store.add(at+timedelta(minutes=40),at+timedelta(minutes=60),Activity("work","code.exe"))
+        self.assertEqual(self.store.reclassify_span(self.day,[(580,599,"work","code.exe","")],"distraction"),1)
+        t=self.store.totals(self.day); self.assertEqual((t["work"],t["distraction"]),(1800,1200))
+        self.assertEqual([s[:3] for s in self.store.segments(self.day)],[(540,569,"work"),(580,599,"distraction")])
+        self.assertEqual(sum(r[2] for r in self.store.hourly(self.day)),3000)
+        self.assertTrue(self.store.undo())
+        t=self.store.totals(self.day); self.assertEqual((t["work"],t["distraction"]),(3000,0))
+        self.assertEqual(self.store.reclassify_span(self.day,[(540,569,"work","code.exe","")],"ignore"),1)
+        self.assertEqual(self.store.totals(self.day)["work"],1200)
+        self.assertTrue(self.store.undo()); self.assertEqual(self.store.totals(self.day)["work"],3000)
+
+    def test_manual_time_fills_gaps_and_away_but_not_recorded_programs(self):
+        at=datetime(2026,11,10,14,0)
+        self.store.add(at,at+timedelta(minutes=10),Activity("idle"))                      # 14:00–14:10 away
+        self.store.add(at+timedelta(minutes=10),at+timedelta(minutes=20),Activity("work","code.exe"))  # 14:10–14:20 recorded
+        added=self.store.add_manual(at,at+timedelta(minutes=30),"work","开会")             # 14:20–14:30 has nothing
+        self.assertEqual(added,1200)
+        t=self.store.totals(self.day); self.assertEqual((t["work"],t["idle"]),(1800,0))
+        self.assertEqual(dict((r[1],r[3]) for r in self.store.details(self.day)),{"code.exe":600.0,"开会（补记）":1200.0})
+        self.assertEqual([s[:4] for s in self.store.segments(self.day)],[(840,849,"work","开会（补记）"),(850,859,"work","code.exe"),(860,869,"work","开会（补记）")])
+        self.assertEqual(self.store.add_manual(at,at+timedelta(minutes=30),"work","开会"),0)  # nothing left to fill
+        self.assertTrue(self.store.undo())
+        t=self.store.totals(self.day); self.assertEqual((t["work"],t["idle"]),(600,600))
+        self.assertEqual(sum(r[2] for r in self.store.hourly(self.day)),1200)
+        with self.assertRaises(ValueError): self.store.add_manual(at,at,"work","x")
+        with self.assertRaises(ValueError): self.store.add_manual(at,at+timedelta(days=1,minutes=5),"work","x")
+
 if __name__=="__main__": unittest.main()

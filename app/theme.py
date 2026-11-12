@@ -369,6 +369,15 @@ def _draw(p, kind, color):
         p.drawArc(QRectF(4, 4, 16, 16), 100*16, 300*16); p.drawLine(11, 4, 14.5, 2); p.drawLine(11, 4, 14, 7)
     elif kind == "search":
         p.drawEllipse(QRectF(4, 4, 12, 12)); p.drawLine(14.5, 14.5, 20, 20)
+    elif kind == "pen":  # time entered by hand
+        path = QPainterPath(QPointF(4, 20)); path.lineTo(5, 15.5); path.lineTo(15.5, 5); path.lineTo(19, 8.5); path.lineTo(8.5, 19); path.closeSubpath()
+        p.drawPath(path); p.drawLine(QPointF(13.5, 7), QPointF(17, 10.5))
+    elif kind == "plus":
+        p.drawLine(12, 5, 12, 19); p.drawLine(5, 12, 19, 12)
+    elif kind == "down":
+        p.drawLine(6, 9, 12, 15); p.drawLine(12, 15, 18, 9)
+    elif kind == "import":  # arrow into a tray: bring a backup back
+        p.drawLine(12, 3, 12, 14); p.drawLine(7, 9, 12, 14); p.drawLine(17, 9, 12, 14); p.drawLine(4, 15, 4, 20); p.drawLine(4, 20, 20, 20); p.drawLine(20, 20, 20, 15)
     else:
         p.drawEllipse(QRectF(3, 3, 18, 18)); p.drawLine(8, 12, 11, 15); p.drawLine(11, 15, 17, 8)
 
