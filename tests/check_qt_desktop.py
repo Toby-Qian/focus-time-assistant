@@ -14,6 +14,7 @@ from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QApplication
 from theme import setup
 from desktop import App
+from ui_qt import CategoryDelegate
 from core import Activity
 import windows
 
@@ -161,9 +162,15 @@ def check():
         assert not appicons.icon_for("bilibili.com","distraction").isNull() and not appicons.icon_for("nowhere.exe","unknown").isNull()
         # Back after a long time away: prompt, count as work, undo; per-program daily limit.
         from core import Activity as A
-        w.config["return_prompt_minutes"]=15; w.away_since=datetime.now()-timedelta(minutes=20)
-        w.track_away(A("work","code.exe"),0,False); assert w.return_prompt is not None,"回来时没有询问补记"
-        w.return_prompt.close()
+        w.config["return_prompt_minutes"]=15; w.idle_now=False; w.track_away(A("distraction","chrome.exe","www.bilibili.com"),0,False)
+        w.idle_now=True; w.track_away(A("idle"),600,False); w.away_since=datetime.now()-timedelta(minutes=20)
+        w.idle_now=False; w.track_away(A("distraction","chrome.exe","www.bilibili.com"),0,False); assert w.return_prompt is not None,"回来时没有询问补记"
+        assert set(w.return_prompt.choices)=={"idle","distraction","work"} and w.return_prompt.choices["distraction"].property("role")=="primary","回来补记的选项不对"
+        w.return_prompt.choices["idle"].click(); q.processEvents(); assert w.return_prompt is None
+        distracted=now-timedelta(hours=5); w.store.add(distracted,distracted+timedelta(minutes=12),A("idle")); w.store.flush()
+        before=w.store.totals(day); w.count_away_as("distraction",distracted,distracted+timedelta(minutes=12))
+        after=w.store.totals(day); assert after["distraction"]-before["distraction"]>=700 and before["idle"]-after["idle"]>=700,"算作摸鱼没有生效"
+        w.toast.run_action(); assert abs(w.store.totals(day)["distraction"]-before["distraction"])<1,"算作摸鱼撤销失败"
         away=now-timedelta(hours=3); w.store.add(away,away+timedelta(minutes=18),A("idle")); w.store.flush()
         idle_before=w.store.totals(day)["idle"]; w.count_away_as_work(away,away+timedelta(minutes=18))
         assert w.store.totals(day)["idle"]<=idle_before-1000,"补记没有生效"; w.toast.run_action()
@@ -225,6 +232,28 @@ def check():
         w.records_changed(); w.refresh_manager(force=True); assert w.table.item(1,2).text()=="开会（补记）" and w.store.totals(past_day)["idle"]==0,"补记失败"
         w.undo_correction(); assert w.store.totals(past_day)["idle"]==1200
         w.manager_view.setCurrentIndex(0); q.processEvents(); assert w.table.horizontalHeaderItem(1).text()=="应用" and w.change_future.isVisibleTo(w)
+        # 小类: overview breakdown, filtering the activity list, re-assigning a site (undoable), deleting, daily limit.
+        import subcats
+        w.store.add(past+timedelta(hours=5),past+timedelta(hours=5,minutes=25),Activity("distraction","chrome.exe","www.douyin.com"))
+        w.store.add(past+timedelta(hours=6),past+timedelta(hours=6,minutes=10),Activity("distraction","chrome.exe","www.bilibili.com")); w.store.flush()
+        w.navigate(0); w.refresh(force=True); assert not hasattr(w,"sub_overview"),"总览不应有小类卡片"
+        w.open_manager(category="distraction",day=past_day,sub=("distraction","short")); q.processEvents()
+        assert w.table.rowCount()==1 and w.sub_chip.isVisible() and "短视频" in w.sub_chip.text(),"按小类筛选失败"
+        assert w.table.item(0,0).data(CategoryDelegate.SUB)=="短视频","活动管理没有显示小类"
+        w.clear_sub_filter(); assert not w.sub_chip.isVisible() and w.table.rowCount()>=2
+        w.set_sub("distraction",["bilibili.com"],"short")
+        assert subcats.lookup("distraction","chrome.exe","www.bilibili.com",w.config)=="short" and subcats.lookup("work","chrome.exe","www.bilibili.com",w.config)=="course"
+        w.toast.run_action(); assert subcats.lookup("distraction","chrome.exe","www.bilibili.com",w.config)=="video","小类修改撤销失败"
+        w.delete_sub("distraction","video"); assert all(i["id"]!="video" for i in w.config["subcategories"]["distraction"])
+        assert subcats.lookup("distraction","","bilibili.com",w.config)==""; w.toast.run_action()
+        assert any(i["id"]=="video" for i in w.config["subcategories"]["distraction"]),"删除小类撤销失败"
+        w.store.add(now-timedelta(minutes=50),now-timedelta(minutes=29),Activity("distraction","chrome.exe","www.douyin.com")); w.store.flush()
+        w.set_sub_limit("short",20); w.sub_limit_timer.stop(); w.goal_flags={}; w.toast.hide(); w.check_sub_limits(day)
+        assert w.goal_flags.get("sub:short") and w.toast.isVisible() and "短视频" in w.toast.label.text(),"小类上限没有提醒"
+        w.toast.hide(); w.check_sub_limits(day); assert not w.toast.isVisible(),"小类上限重复提醒"
+        assert "短视频今天" in w.sub_limit_note(Activity("distraction","chrome.exe","www.douyin.com"))
+        w.navigate(3); w.switch_settings(2); q.processEvents(); assert w.sub_lists["distraction"].count()==len(w.config["subcategories"]["distraction"])
+        w.set_sub_limit("short",0); w.switch_settings(0); w.navigate(1); w.sub_kind.setCurrentIndex(1); q.processEvents(); w.sub_kind.setCurrentIndex(0)
         # Backup and restore: records come back exactly, and what was there is kept in a file beside them.
         import sqlite3
         saved=w.data_dir/"backup_check.sqlite3"; w.store.flush(); target=sqlite3.connect(saved); w.store.db.backup(target); target.close()

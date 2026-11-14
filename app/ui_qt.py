@@ -18,7 +18,7 @@ from core import CATEGORIES, EXPORT_PARTS, LABELS, OWN_WINDOW_MODES, RULE_TARGET
 from theme import ACCENT, COLORS, MUTED, INK, P, TEXTS, THEME, THEMES, TINTS, icon, font
 import windows
 import theme
-from charts import Donut, Heatmap, StackedBars, RankList, Timeline, hide_tooltip
+from charts import Donut, Heatmap, StackedBars, RankList, SubBars, Timeline, hide_tooltip
 
 PAGES = [("今日总览", "overview", "今天的专注", "实时记录今天的投入、分心与离开。"),
          ("时间分析", "chart", "时间分析", "选一段时间看投入、分心和节奏；点日历或柱子分析某一天。"),
@@ -162,6 +162,18 @@ class IconLabel(QWidget):
         self.qicon.paint(QPainter(self), self.rect())
 
 
+class ElidedLabel(QWidget):
+    """One line of small grey text that ends in "…" when it does not fit (a QLabel would cut a glyph in half)."""
+    def __init__(self, value):
+        super().__init__(); self.value = value
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed); self.setFixedHeight(20)
+
+    def paintEvent(self, _):
+        p = QPainter(self); p.setRenderHint(QPainter.RenderHint.TextAntialiasing); p.setFont(font(12)); p.setPen(QColor(P["subtle"]))
+        p.drawText(self.rect(), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                   p.fontMetrics().elidedText(self.value, Qt.TextElideMode.ElideRight, self.width()))
+
+
 class EmptyState(QWidget):
     """A soft illustration for empty lists: tinted disc, icon, title and hint."""
     def __init__(self, kind, title, hint=""):
@@ -273,8 +285,9 @@ class Toast(QFrame):
 
 
 class CategoryDelegate(QStyledItemDelegate):
-    """Keeps the category colour (dot + text) visible on selected rows."""
+    """Keeps the category colour (dot + text) visible on selected rows; a 小类 follows in grey."""
     ROLE = Qt.ItemDataRole.UserRole+1
+    SUB = Qt.ItemDataRole.UserRole+2  # name of the subcategory, shown as "工作 · 编程"
 
     def __init__(self, parent=None, chevron=False):
         super().__init__(parent); self.chevron = chevron  # chevron: the cell opens a category menu when clicked
@@ -295,8 +308,15 @@ class CategoryDelegate(QStyledItemDelegate):
         painter.drawEllipse(QRectF(rect.x(), rect.center().y()-3.5, 7, 7))
         painter.setPen(QColor(TEXTS[key])); painter.setFont(option.font)
         painter.drawText(rect.adjusted(15, 0, 0, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, index.data())
+        end = rect.x()+15+painter.fontMetrics().horizontalAdvance(index.data())
+        sub = index.data(self.SUB)
+        if sub:
+            room = rect.right()-end-(18 if self.chevron else 0)
+            shown = painter.fontMetrics().elidedText(" · "+sub, Qt.TextElideMode.ElideRight, max(0, room))
+            painter.setPen(QColor(P["muted"])); painter.drawText(QRectF(end, rect.y(), max(0, room), rect.height()), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, shown)
+            end += painter.fontMetrics().horizontalAdvance(shown)
         if self.chevron:
-            x = rect.x()+15+painter.fontMetrics().horizontalAdvance(index.data())+7; y = rect.center().y()
+            x = end+7; y = rect.center().y()
             pen = QPen(QColor(COLORS[key] if option.state & QStyle.StateFlag.State_MouseOver else P["subtle"]), 1.4)
             pen.setCapStyle(Qt.PenCapStyle.RoundCap); painter.setPen(pen)
             painter.drawPolyline([QPointF(x, y-1.5), QPointF(x+3.5, y+2), QPointF(x+7, y-1.5)])
@@ -324,11 +344,12 @@ class StatCard(QFrame):
             self.clicked.emit()
 
 
-def kpi(title, parent_layout, kind="chart"):
+def kpi(title, parent_layout, kind="chart", colour=None, wash=None):
+    """A figure tile; the icon chip takes the colour of what it counts (as on the overview cards)."""
     frame, inside = card(name="kpi", margins=(16, 12, 16, 12), spacing=2)
     top = QHBoxLayout(); top.setSpacing(8)
-    chip = QFrame(); chip.setFixedSize(22, 22); chip.setStyleSheet(f"background:{P['soft']};border-radius:6px;")
-    inner = QHBoxLayout(chip); inner.setContentsMargins(4, 4, 4, 4); inner.addWidget(IconLabel(icon(kind, ACCENT, 14), 14))
+    chip = QFrame(); chip.setFixedSize(22, 22); chip.setStyleSheet(f"background:{wash or P['soft']};border-radius:6px;")
+    inner = QHBoxLayout(chip); inner.setContentsMargins(4, 4, 4, 4); inner.addWidget(IconLabel(icon(kind, colour or ACCENT, 14), 14))
     top.addWidget(chip); top.addWidget(text(title, "small")); top.addStretch()
     inside.addLayout(top); value = text("—", "kpi"); inside.addWidget(value)
     value.sub = text("", "muted")  # kept short; it never widens its tile, so the five tiles stay equal
@@ -571,9 +592,13 @@ class Shell(QMainWindow):
         self.analysis_watch = ResizeWatch(view.viewport(), self.fit_analysis_controls)
 
         tiles = QHBoxLayout(); tiles.setSpacing(12)
-        self.kpis = {"work": kpi("工作", tiles, "work"), "distraction": kpi("摸鱼", tiles, "distraction"),
-                     "focus": kpi("专注率", tiles, "target"), "present": kpi("在电脑前", tiles, "monitor"),
-                     "sessions": kpi("完成专注", tiles, "flame")}
+        # Colours as elsewhere: 工作 / 摸鱼 their category colours, 专注率 the accent (like 开始专注),
+        # 在电脑前 the blue of the computer-side category, 完成专注 a warm flame.
+        flame = QColor(P["danger"]); flame.setAlpha(36); flame_wash = f"rgba({flame.red()},{flame.green()},{flame.blue()},{flame.alpha()})"
+        self.kpis = {"work": kpi("工作", tiles, "work", COLORS["work"], TINTS["work"]),
+                     "distraction": kpi("摸鱼", tiles, "distraction", COLORS["distraction"], TINTS["distraction"]),
+                     "focus": kpi("专注率", tiles, "target"), "present": kpi("在电脑前", tiles, "monitor", COLORS["system"], TINTS["system"]),
+                     "sessions": kpi("完成专注", tiles, "flame", P["danger"], flame_wash)}
         self.kpis["focus"].parentWidget().setToolTip("工作 ÷（工作 + 摸鱼 + 待分类），可在设置里改为不含待分类；系统工具和离开不算")
         for key in ("work", "distraction"): self.kpis[key].parentWidget().setToolTip("日均按有记录的日子计算，没开程序的日子不算")
         self.kpis["present"].parentWidget().setToolTip("工作、摸鱼、系统工具和待分类的合计，即除离开以外记录到的时间")
@@ -627,6 +652,15 @@ class Shell(QMainWindow):
         inside.addLayout(grid)
         self.compare_note = text("", "small", wrap=True); inside.addWidget(self.compare_note); inside.addStretch()
         pair.addWidget(panel, 1); layout.addLayout(pair); self.analysis_pair = pair
+
+        panel, inside = card(margins=(20, 16, 20, 18), spacing=12)
+        head = heading("细分", "tags"); head.addSpacing(10)
+        self.sub_kind = Segmented([("工作细分", "work"), ("摸鱼细分", "distraction")])
+        self.sub_kind.currentIndexChanged.connect(lambda _: self.refresh_analysis()); head.addWidget(self.sub_kind); head.addStretch()
+        head.addWidget(button("管理小类", lambda: self.open_subs(), role="link")); inside.addLayout(head)
+        self.sub_analysis = SubBars()
+        self.sub_analysis.chosen.connect(lambda cat, sid: self.open_manager(category=cat, day=self.analysis_last, sub=(cat, sid)))
+        inside.addWidget(self.sub_analysis); layout.addWidget(panel)
 
         self.trend_card, inside = card()
         head = heading("每日时间", "chart"); head.addStretch(); head.addLayout(legend()); inside.addLayout(head)
@@ -731,7 +765,9 @@ class Shell(QMainWindow):
         panel, inside = card(spacing=10)
         filters = QHBoxLayout(); filters.setSpacing(10)
         self.category_filter = Segmented([("全部", "")]+[(title, key) for key, title in CATEGORIES.items()])
-        self.category_filter.currentIndexChanged.connect(lambda _: self.refresh_manager(force=True)); filters.addWidget(self.category_filter)
+        self.category_filter.currentIndexChanged.connect(lambda _: self.category_filtered()); filters.addWidget(self.category_filter)
+        self.sub_chip = button("", lambda: self.clear_sub_filter(), kind="close"); self.sub_chip.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        self.sub_chip.setToolTip("只看这个小类；点一下取消"); self.sub_chip.hide(); filters.addWidget(self.sub_chip)
         filters.addStretch()
         # 按应用: one row per program / site with the day's total. 按时间: the day in order, one row per stretch.
         self.manager_view = Segmented([("按应用", "apps"), ("按时间", "time")])
@@ -753,7 +789,7 @@ class Shell(QMainWindow):
         self.undo_button = button("撤销", self.undo_correction, kind="undo")
         self.undo_button.setToolTip("撤销上次记录修正（Ctrl+Z），修改后新增的时间保留；规则不会被撤销。"); actions.addWidget(self.undo_button)
         inside.addLayout(actions)
-        self.table = table(["分类", "应用", "网站", "累计时长", "占当日"], [110, 0, 0, 110, 90])
+        self.table = table(["分类", "应用", "网站", "累计时长", "占当日"], [160, 0, 0, 110, 90])
         self.table.setToolTip("Ctrl / Shift 多选；右键可批量设置；双击调整以后的分类规则。离开时间也能改，改后记为“离开期间（补记）”。")
         self.table.itemSelectionChanged.connect(self.selection_changed)
         self.table.cellDoubleClicked.connect(lambda row, _: self.rule_for_row(row))
@@ -762,7 +798,7 @@ class Shell(QMainWindow):
         self.empty_label.hide(); inside.addWidget(self.empty_label, 1)
         foot = QHBoxLayout(); foot.setSpacing(10)
         self.manager_total = text("", "small"); foot.addWidget(self.manager_total); foot.addStretch()
-        self.manager_hint = text("", "small"); foot.addWidget(self.manager_hint); inside.addLayout(foot)
+        self.manager_hint = text("Ctrl / Shift 多选 · 右键更多操作（改小类也在这里） · 双击调整以后的规则", "small"); foot.addWidget(self.manager_hint); inside.addLayout(foot)
         layout.addWidget(panel, 1); self.pages.addWidget(view)
 
     def spin(self, low, high, value, suffix, step=1, off=None, tip=""):
@@ -789,7 +825,7 @@ class Shell(QMainWindow):
         # Two tabs: preferences (scrolls) and the rule table (fills the page, like 活动管理).
         view, outer = page(scroll=False)
         tabs = QHBoxLayout(); tabs.setSpacing(12)
-        self.settings_tab = Segmented([("偏好设置", "prefs"), ("分类规则", "rules")])
+        self.settings_tab = Segmented([("偏好设置", "prefs"), ("分类规则", "rules"), ("小类与上限", "subs")])
         self.settings_tab.currentIndexChanged.connect(self.switch_settings); tabs.addWidget(self.settings_tab)
         self.settings_note = text("", "small"); tabs.addWidget(self.settings_note); tabs.addStretch(); outer.addLayout(tabs)
         self.settings_stack = QStackedWidget(); outer.addWidget(self.settings_stack, 1)
@@ -812,7 +848,7 @@ class Shell(QMainWindow):
         self.return_combo.addItem("不询问", 0)
         for minutes in (10, 15, 30, 60): self.return_combo.addItem(f"离开 {minutes} 分钟以上", minutes)
         self.return_combo.setCurrentIndex(max(0, self.return_combo.findData(c["return_prompt_minutes"])))
-        self.return_combo.setToolTip("离开这么久再回来时，右下角问一次要不要把这段时间算作工作（开会、看纸质资料、打电话）")
+        self.return_combo.setToolTip("没有操作这么久再回来时，右下角问一次刚才那段算工作、摸鱼还是离开\n（看视频、开会、看纸质资料时电脑会以为你离开了）")
         self.return_combo.currentIndexChanged.connect(self.schedule_preferences)
         self.learning_spin = self.spin(5, 240, c["learning_minutes"], " 分钟", 5, tip="在摸鱼网站或应用上点“继续摸鱼”后，这么长时间内不再提醒；时间照常算摸鱼")
         self.rest_spin = self.spin(0, 240, c["rest_after_minutes"], " 分钟", 5, "关闭", "连续使用电脑这么久后提醒休息；离开一段时间会重新计时")
@@ -900,7 +936,7 @@ class Shell(QMainWindow):
         self.custom_only = QCheckBox("只看自定义"); self.custom_only.toggled.connect(lambda _: self.refresh_rules()); filters.addWidget(self.custom_only)
         inside.addLayout(filters)
         inside.addWidget(text("网站规则优先于浏览器应用规则，更具体的子域名优先；没装扩展时，对抖音 / 小红书 / B站的网站规则同样生效。", "small", wrap=True))
-        self.rules_table = table(["分类", "类型", "应用 / 网站", "每日上限", "来源"], [110, 80, 0, 96, 90])
+        self.rules_table = table(["分类", "类型", "应用 / 网站", "每日上限", "来源"], [176, 80, 0, 96, 90])
         self.rules_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.rules_table.setToolTip("点分类可直接改；右键有更多操作；双击编辑。")
         self.rules_table.setItemDelegateForColumn(0, CategoryDelegate(self.rules_table, chevron=True))
@@ -910,17 +946,40 @@ class Shell(QMainWindow):
         self.rules_table.cellClicked.connect(lambda row, col: col == 0 and self.rule_menu(row))
         self.rules_table.cellDoubleClicked.connect(lambda row, col: col != 0 and self.edit_rule())
         inside.addWidget(self.rules_table, 1)
-        layout.addWidget(panel, 1); self.pages.addWidget(view)
+        layout.addWidget(panel, 1)
+        self.build_subs(); self.pages.addWidget(view)
         self.switch_settings(0)
+
+    def build_subs(self):
+        """设置 → 小类与上限: the two lists; rows are filled by refresh_subs()."""
+        view, layout = page(); self.settings_stack.addWidget(view)
+        cards = QHBoxLayout(); cards.setSpacing(12); self.sub_lists = {}; self.sub_counts = {}
+        for key, title, hint in (("work", "工作小类", "工作时间按这些小类细分。"),
+                                 ("distraction", "摸鱼小类", "可以给每个小类设每日上限，到了提醒一次。")):
+            panel, inside = card(spacing=8)
+            head = heading(title, key); self.sub_counts[key] = text("", "small"); head.addWidget(self.sub_counts[key]); head.addStretch()
+            head.addWidget(button("新建小类", lambda checked=False, k=key: self.add_sub(k), kind="plus")); inside.addLayout(head)
+            inside.addWidget(text(hint, "small"))
+            rows = QVBoxLayout(); rows.setSpacing(0); inside.addLayout(rows); inside.addStretch(); self.sub_lists[key] = rows
+            cards.addWidget(panel, 1)
+        layout.addLayout(cards)
+        tips = QFrame(); tips.setObjectName("note"); row = QHBoxLayout(tips); row.setContentsMargins(14, 10, 14, 10); row.setSpacing(10)
+        row.addWidget(IconLabel(icon("bulb", ACCENT, 16), 16))
+        row.addWidget(text("哪个应用、网站算哪个小类：在“活动管理”或“分类规则”里右键那一行，选“小类”。常见的应用和网站已经分好；改了以后，以前的记录也会按新的小类统计。",
+                           "small", wrap=True), 1)
+        row.addWidget(button("恢复默认小类", lambda: self.reset_subs())); layout.addWidget(tips); layout.addStretch()
+
 
     def switch_settings(self, index):
         changed = index != self.settings_stack.currentIndex()
         self.settings_stack.setCurrentIndex(index)
         if self.settings_tab.currentIndex() != index:
             self.settings_tab.blockSignals(True); self.settings_tab.setCurrentIndex(index); self.settings_tab.blockSignals(False)
-        self.settings_note.setText("修改后自动保存，马上生效。" if index == 0 else "决定每个应用、网站以后记成哪一类；已经记下的时间在“活动管理”里改。")
+        self.settings_note.setText(("修改后自动保存，马上生效。", "决定每个应用、网站以后记成哪一类；已经记下的时间在“活动管理”里改。",
+                                    "把工作和摸鱼再分细一点：看看工作在做什么、摸鱼在干什么。")[index])
         if changed and self.isVisible(): fade_in(self.settings_stack.currentWidget())
         if index == 1 and hasattr(self, "store"): self.refresh_rules()
+        if index == 2 and hasattr(self, "store"): self.refresh_subs()
 
     def build_browser(self):
         view, layout = page()

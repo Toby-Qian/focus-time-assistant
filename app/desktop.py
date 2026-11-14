@@ -32,7 +32,8 @@ from insights import insights, work_rhythm
 from bridge import BrowserState, start_bridge
 from theme import ACCENT, COLORS, INK, P, TEXTS, THEMES, TINTS, MUTED, SUBTLE, app_name, icon, key_name, label, site_name
 from charts import focus_ratio, short_time, share
-from ui_qt import Shell, CategoryDelegate, IconLabel, Segmented, text, button, restyle, set_text, fade_in
+import subcats
+from ui_qt import Shell, CategoryDelegate, ElidedLabel, IconLabel, Segmented, text, button, restyle, set_text, fade_in
 import theme
 import windows
 import appicons
@@ -96,6 +97,8 @@ class Reminder(QWidget):
         today = owner.store.totals(datetime.now().date().isoformat())
         limit = owner.config["distraction_limit_minutes"]*60
         stats = f"今天已工作 {short_time(today['work'])} · 摸鱼 {short_time(today['distraction'])}" + (f"（上限 {short_time(limit)}）" if limit else "")
+        note = owner.sub_limit_note(activity)
+        if note: stats += f"\n{note}"
         layout.addWidget(text(stats, "muted"))
         row = QHBoxLayout(); row.setSpacing(10); row.addStretch()
         if activity.site:
@@ -266,8 +269,12 @@ class FocusFloat(QWidget):
 
 
 class ReturnPrompt(QWidget):
-    """Small card in the corner after a long time away: count it as work, or keep it as away."""
-    def __init__(self, owner, began, ended):
+    """Small card in the corner after a long time without input: was that work, distraction or away?
+
+    Watching a film or a lecture, a meeting or reading on paper all look like "away" to the computer.
+    `before` is what was in the foreground when the input stopped; its category is the suggested answer.
+    """
+    def __init__(self, owner, began, ended, before=None):
         super().__init__(None, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.WindowDoesNotAcceptFocus)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating); self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
@@ -277,19 +284,26 @@ class ReturnPrompt(QWidget):
         body = QFrame(); body.setObjectName("card"); outer.addWidget(body)
         layout = QVBoxLayout(body); layout.setContentsMargins(18, 16, 18, 14); layout.setSpacing(6)
         minutes = round((ended-began).total_seconds()/60)
-        layout.addWidget(text(f"欢迎回来，刚才离开了 {minutes} 分钟", "heading"))
-        layout.addWidget(text(f"{began:%H:%M} – {ended:%H:%M} 如果是在开会、看纸质资料或打电话，可以算作工作。", "muted", wrap=True))
-        row = QHBoxLayout(); row.setSpacing(8); row.addStretch()
-        row.addWidget(button("保持离开", self.close)); row.addWidget(button("算作工作", self.count_as_work, True))
-        layout.addLayout(row); self.setFixedWidth(380)
+        layout.addWidget(text(f"刚才 {minutes} 分钟没有操作，这段在做什么？", "heading"))
+        name = (site_name(before.host) if before.host else before.site) or app_name(before.app) if before and (before.app or before.host) else ""
+        layout.addWidget(text(f"{began:%H:%M} – {ended:%H:%M}" + (f"，之前在用“{name}”" if name else "") +
+                              "。看视频、开会、看纸质资料时，电脑会以为你离开了。", "muted", wrap=True))
+        suggested = "distraction" if before and before.category == "distraction" else "work"
+        row = QHBoxLayout(); row.setSpacing(8); row.addStretch(); self.choices = {}
+        for key, label in (("idle", "保持离开"), ("distraction", "算作摸鱼"), ("work", "算作工作")):
+            choice = button(label, lambda checked=False, k=key: self.choose(k), key == suggested)
+            if key != "idle": choice.setIcon(icon(key, P["on_accent"] if key == suggested else COLORS[key], 16))
+            self.choices[key] = choice; row.addWidget(choice)
+        layout.addSpacing(6); layout.addLayout(row); self.setFixedWidth(420)
         self.timer = QTimer(self); self.timer.setSingleShot(True); self.timer.timeout.connect(self.close); self.timer.start(90_000)
         self.adjustSize()
         area = QApplication.primaryScreen().availableGeometry()
         self.move(area.right()-self.width()-8, area.bottom()-self.height()-8)
 
-    def count_as_work(self):
+    def choose(self, category):
         owner, began, ended = self.owner, self.began, self.ended
-        self.close(); owner.count_away_as_work(began, ended)
+        self.close()
+        if category != "idle": owner.count_away_as(category, began, ended)
 
     def paintEvent(self, _):
         from PySide6.QtGui import QPainter
@@ -449,6 +463,7 @@ class WelcomeDialog(QDialog):
 
 
 class App(Shell):
+    manager_sub = None  # (category, subcategory id) the activity list is narrowed to
     analysis_day = None  # one day picked from the calendar / a bar, instead of a range
     analysis_custom = None  # ("week" | "lastweek" | "month" | "lastmonth" | "custom", first day, last day) from the 更多 menu
     analysis_last = None  # last day of what the analysis page shows
@@ -493,10 +508,239 @@ class App(Shell):
             QShortcut(QKeySequence(f"Ctrl+{index+1}"), self).activated.connect(lambda i=index: self.navigate(i))
         self.restore_window()
         self.preferences_timer = QTimer(self); self.preferences_timer.setSingleShot(True); self.preferences_timer.setInterval(600); self.preferences_timer.timeout.connect(self.save_preferences)
+        self.sub_limit_timer = QTimer(self); self.sub_limit_timer.setSingleShot(True); self.sub_limit_timer.setInterval(600)
+        self.sub_limit_timer.timeout.connect(lambda: (save_config(self.config_path, self.config), self.refresh(force=True)))
         self.trim_timer = QTimer(self); self.trim_timer.setInterval(TRIM_EVERY_MS); self.trim_timer.timeout.connect(self.trim_if_hidden)
         self.timer = QTimer(self); self.timer.setInterval(SAMPLE_MS); self.timer.timeout.connect(self.tick)
         if not testing:
             self.timer.start(); self.trim_timer.start(); QTimer.singleShot(50, self.tick)
+
+
+    # ── 小类 (subcategories of 工作 and 摸鱼) ─────────────────────────────
+    def sub_name(self, category, sid):
+        return subcats.name(category, sid, self.config)
+
+    def sub_palette(self, category):
+        """{id: colour} in list order; 其他 is the neutral grey."""
+        ids = subcats.order(category, self.config)
+        colours = theme.sub_colors(category, len(ids)-1)
+        return {**dict(zip(ids[:-1], colours)), subcats.OTHER: COLORS["idle"]}
+
+    def sub_members_text(self, category, sid, most=4):
+        """"抖音、快手、视频号 等 7 个": the user's own choices first, then names people know before bare
+        program files (pycharm64.exe), so the list reads like the apps and sites it means."""
+        mine = set(self.config["sub_rules"]); named, plain = [], []
+        for key in subcats.members(category, sid, self.config):
+            shown = key_name(key); friendly = shown != key or key in mine
+            target = named if friendly else plain
+            shown = shown if friendly else shown.removesuffix(".exe")
+            if shown not in named and shown not in plain: target.append(shown)
+        names = named+plain
+        if not names: return ""
+        return "、".join(names[:most])+(f" 等 {len(names)} 个" if len(names) > most else "")
+
+    def sub_rows(self, category, seconds_by_id, total, before=None, most=None, span="", one_day=True):
+        """Rows for a SubBars widget: biggest first, 其他 last; time (and the daily limit, for one day only),
+        share, and change."""
+        colours = self.sub_palette(category); limits = self.config["sub_limits"] if category == "distraction" and one_day else {}
+        named = sorted(((sid, sec) for sid, sec in seconds_by_id.items() if sid and sec >= 30), key=lambda r: r[1], reverse=True)
+        if most and len(named) > most: named = named[:most]
+        rest = sum(seconds_by_id.values())-sum(sec for _, sec in named)
+        items = named+([(subcats.OTHER, rest)] if rest >= 30 else [])
+        rows = []
+        for sid, seconds in items:
+            name = self.sub_name(category, sid); limit = limits.get(sid, 0)*60
+            time_text = short_time(seconds)+(f" / {short_time(limit)}" if limit else "")
+            cells = [(time_text, P["danger"] if limit and seconds > limit else None), (share(seconds, total), SUBTLE)]
+            tip = f"{name} · {short_time(seconds)} · 占{LABELS[category]} {share(seconds, total)}"
+            if limit: tip += f"\n每日上限 {short_time(limit)}" + ("，已超出" if seconds > limit else "")
+            if before is not None:
+                diff = seconds-before.get(sid, 0.0)
+                if not sum(before.values()): cells.append(("—", SUBTLE))
+                elif abs(diff) < 60: cells.append(("持平", SUBTLE))
+                else:
+                    good = diff > 0 if category == "work" else diff < 0
+                    cells.append((f"{'↑' if diff > 0 else '↓'} {short_time(abs(diff))}", TEXTS["work"] if good else P["danger"]))
+                    tip += f"\n比{span}{'多' if diff > 0 else '少'} {short_time(abs(diff))}"
+            members = self.sub_members_text(category, sid) if sid else ""
+            tip += f"\n包括 {members}" if members else "\n没有归到任何小类的应用和网站" if not sid else ""
+            rows.append((sid, name, seconds, colours[sid], cells, tip+"\n点击查看这些记录"))
+        return rows
+
+    def open_subs(self):
+        self.navigate(3); self.switch_settings(2)
+
+    def sub_key(self, app, host):
+        return subcats.rule_key(app, host, self.config)
+
+    def sub_snapshot(self):
+        import copy
+        saved = copy.deepcopy({key: self.config[key] for key in ("subcategories", "sub_rules", "sub_limits")})
+        def restore():
+            self.config.update(copy.deepcopy(saved)); self.subs_changed("已撤销。")
+        return restore
+
+    def subs_changed(self, message=None, undo=None):
+        save_config(self.config_path, self.config)
+        self.manager_signature = None  # limit reminders already shown today stay shown; set_sub_limit resets its own
+        self.refresh(force=True)
+        if self.pages.currentIndex() == 3:
+            if self.settings_stack.currentIndex() == 1: self.refresh_rules()
+            if self.settings_stack.currentIndex() == 2: self.refresh_subs()
+        if message: self.notify(message, undo, seconds=6 if undo else 4)
+
+    def set_sub(self, category, keys, sid):
+        """Put programs / websites into a subcategory of `category`; it applies to every recorded day."""
+        undo = self.sub_snapshot(); rules = self.config["sub_rules"]
+        for key in keys:
+            choice = rules.setdefault(key, {})
+            choice.pop(category, None)
+            if subcats.lookup(category, key if key.endswith(".exe") or "." not in key else "", key if "." in key and not key.endswith(".exe") else "", self.config) != sid:
+                choice[category] = sid
+            if not choice: rules.pop(key, None)
+        names = "、".join(key_name(key) for key in keys[:2])+(f" 等 {len(keys)} 项" if len(keys) > 2 else "")
+        self.subs_changed(f"{names} 归到“{self.sub_name(category, sid)}”，以前的记录也按这个统计", undo)
+
+    def sub_menu(self, menu, category, keys, current):
+        """The 小类 submenu for records of one category; `current` is the id they share, or None."""
+        sub = menu.addMenu(icon("tags", ACCENT, 16), "小类")
+        if category not in subcats.SUB_CATEGORIES:
+            sub.setEnabled(False); return
+        colours = self.sub_palette(category)
+        for sid in subcats.order(category, self.config):
+            action = sub.addAction(self.sub_swatch(colours[sid]), "不归类（其他）" if not sid else self.sub_name(category, sid),
+                                   lambda s=sid: self.set_sub(category, keys, s))
+            action.setCheckable(True); action.setChecked(sid == current)
+        sub.addSeparator(); sub.addAction(icon("plus", ACCENT, 16), "新建小类…", lambda: self.add_sub(category, keys))
+
+    @staticmethod
+    def sub_swatch(colour):
+        from PySide6.QtGui import QIcon, QPixmap, QPainter
+        result = QIcon()
+        for scale in (1.0, 1.5, 2.0):
+            size = round(16*scale); pix = QPixmap(size, size); pix.fill(Qt.GlobalColor.transparent)
+            p = QPainter(pix); p.setRenderHint(QPainter.RenderHint.Antialiasing); p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(colour))
+            p.drawRoundedRect(4*scale, 4*scale, 8*scale, 8*scale, 2*scale, 2*scale); p.end(); pix.setDevicePixelRatio(scale); result.addPixmap(pix)
+        return result
+
+    def ask_sub_name(self, title, prompt, current=""):
+        from PySide6.QtWidgets import QInputDialog
+        name, ok = QInputDialog.getText(self, title, prompt, text=current)
+        name = name.strip()[:subcats.NAME_LIMIT] if ok else ""
+        if not name: return ""
+        taken = {item["name"] for cat in subcats.SUB_CATEGORIES for item in self.config["subcategories"][cat]} - {current}
+        if name in taken:
+            QMessageBox.information(self, "名字重复", f"已经有一个叫“{name}”的小类了，换个名字吧。"); return ""
+        return name
+
+    def add_sub(self, category, keys=None):
+        items = self.config["subcategories"][category]
+        if len(items) >= subcats.MOST:
+            self.notify(f"{LABELS[category]}最多 {subcats.MOST} 个小类。"); return
+        name = self.ask_sub_name("新建小类", f"新的{LABELS[category]}小类叫什么？（最多 {subcats.NAME_LIMIT} 个字）")
+        if not name: return
+        undo = self.sub_snapshot(); sid = subcats.new_id(self.config); items.append({"id": sid, "name": name})
+        if keys: return self.set_sub(category, keys, sid)
+        self.subs_changed(f"已新建小类“{name}”。在活动管理或分类规则里右键，把应用归进来。", undo)
+
+    def rename_sub(self, category, sid):
+        item = next(i for i in self.config["subcategories"][category] if i["id"] == sid)
+        name = self.ask_sub_name("小类改名", "改成：", item["name"])
+        if not name or name == item["name"]: return
+        undo = self.sub_snapshot(); old = item["name"]; item["name"] = name
+        self.subs_changed(f"“{old}”改名为“{name}”", undo)
+
+    def delete_sub(self, category, sid):
+        undo = self.sub_snapshot(); items = self.config["subcategories"][category]
+        name = self.sub_name(category, sid)
+        items[:] = [i for i in items if i["id"] != sid]
+        for key in list(self.config["sub_rules"]):
+            choice = self.config["sub_rules"][key]
+            if choice.get(category) == sid: choice.pop(category)
+            if not choice: self.config["sub_rules"].pop(key)
+        self.config["sub_limits"].pop(sid, None)
+        self.subs_changed(f"已删除“{name}”，原来的应用归到其他{LABELS[category]}", undo)
+
+    def reset_subs(self):
+        """Bring back the built-in subcategories and their names; the user's own ones and choices stay."""
+        undo = self.sub_snapshot(); defaults = subcats.default_list()
+        for category in subcats.SUB_CATEGORIES:
+            mine = [i for i in self.config["subcategories"][category] if i["id"] not in {d["id"] for d in defaults[category]}]
+            self.config["subcategories"][category] = (defaults[category]+mine)[:subcats.MOST]
+        self.subs_changed("已恢复默认小类（你新建的小类和设置保持不变）", undo)
+
+    def set_sub_limit(self, sid, minutes):
+        shown = getattr(self, "subs_signature", None) == self.subs_state()  # the list on screen is up to date
+        if minutes: self.config["sub_limits"][sid] = minutes
+        else: self.config["sub_limits"].pop(sid, None)
+        # Its spin box already shows the new value: keep the list instead of rebuilding it under the cursor.
+        if shown: self.subs_signature = self.subs_state()
+        self.goal_flags.pop("sub:"+sid, None); self.sub_limit_timer.start()
+
+    def subs_state(self):
+        import json
+        return json.dumps([self.config[k] for k in ("subcategories", "sub_rules", "sub_limits")], sort_keys=True, ensure_ascii=False)
+
+    def refresh_subs(self):
+        """设置 → 小类与上限: one row per subcategory; rebuilt only when the subcategories changed."""
+        from PySide6.QtWidgets import QSpinBox, QSizePolicy
+        state = self.subs_state()
+        if state == getattr(self, "subs_signature", None): return
+        self.subs_signature = state
+        for category, rows in self.sub_lists.items():
+            while rows.count():
+                item = rows.takeAt(0)
+                if item.widget(): item.widget().deleteLater()
+            items = self.config["subcategories"][category]; colours = self.sub_palette(category)
+            set_text(self.sub_counts[category], f"{len(items)} 个")
+            for index, item in enumerate(items):
+                sid = item["id"]; line = QFrame(); line.setObjectName("subrow")
+                line.setStyleSheet(f"QFrame#subrow {{ border-top:1px solid {P['row_line']}; }}" if index else "")
+                row = QHBoxLayout(line); row.setContentsMargins(0, 8, 0, 8); row.setSpacing(10)
+                swatch = QFrame(); swatch.setFixedSize(12, 12); swatch.setStyleSheet(f"background:{colours[sid]};border-radius:3px;border:0;")
+                row.addWidget(swatch)
+                title = text(item["name"]); title.setStyleSheet("font-size:14px;font-weight:600;"); title.setMinimumWidth(72); row.addWidget(title)
+                members = self.sub_members_text(category, sid, 3)
+                detail = ElidedLabel(members or "还没有应用或网站")
+                detail.setToolTip(self.sub_members_text(category, sid, 40) or "在活动管理或分类规则里右键，选“小类”把应用归进来")
+                row.addWidget(detail, 1)
+                if category == "distraction":
+                    limit = QSpinBox(); limit.setRange(0, 600); limit.setSingleStep(5); limit.setSuffix(" 分钟"); limit.setSpecialValueText("不设上限")
+                    limit.setValue(self.config["sub_limits"].get(sid, 0)); limit.setFixedWidth(124)
+                    limit.setToolTip(f"“{item['name']}”每天最多多少分钟；到了提醒一次，总览里也会标出来")
+                    limit.valueChanged.connect(lambda value, s=sid: self.set_sub_limit(s, value)); row.addWidget(limit)
+                for kind, tip, command in (("pen", "改名", lambda checked=False, s=sid, c=category: self.rename_sub(c, s)),
+                                           ("close", "删除这个小类（可撤销）", lambda checked=False, s=sid, c=category: self.delete_sub(c, s))):
+                    b = button("", command, kind=kind); b.setProperty("role", "icon"); b.setToolTip(tip); b.setFocusPolicy(Qt.FocusPolicy.TabFocus); row.addWidget(b)
+                rows.addWidget(line)
+
+    def check_sub_limits(self, today):
+        """One reminder per subcategory per day once its own daily limit is reached."""
+        limits = self.config["sub_limits"]
+        if not limits: return
+        spent = subcats.totals(self.store.details(today), self.config)["distraction"]
+        for sid, minutes in limits.items():
+            flag = "sub:"+sid; used = spent.get(sid, 0.0)
+            if self.goal_flags.get(flag) or used < minutes*60: continue
+            self.goal_flags[flag] = True; name = self.sub_name("distraction", sid)
+            self.notify(f"{name}今天已经 {short_time(used)}，到了你设的 {minutes} 分钟上限。", label="", seconds=8)
+            self.tray_message(f"{name}到上限了", f"今天已 {short_time(used)}，上限 {minutes} 分钟。", QSystemTrayIcon.MessageIcon.Warning, 6000)
+            if self.config["reminder_sound"]: self.beep()
+
+    def sub_limit_note(self, activity):
+        """For the reminder: how much of this subcategory's daily limit is used."""
+        sid = subcats.lookup(activity.category, activity.app, activity.host, self.config)
+        minutes = self.config["sub_limits"].get(sid) if sid else None
+        if not minutes: return ""
+        used = subcats.totals(self.store.details(datetime.now().date().isoformat()), self.config)["distraction"].get(sid, 0.0)
+        return f"{self.sub_name('distraction', sid)}今天 {short_time(used)} / 上限 {minutes} 分钟"
+
+    def category_filtered(self):
+        if self.manager_sub and self.manager_sub[0] != self.category_filter.currentData(): self.manager_sub = None
+        self.refresh_manager(force=True)
+
+    def clear_sub_filter(self):
+        self.manager_sub = None; self.refresh_manager(force=True)
 
     # ── tray and window ───────────────────────────────────────────────
     def build_tray(self):
@@ -683,14 +927,16 @@ class App(Shell):
     def track_away(self, current, age, locked):
         """Remember when an away stretch began; when the user returns after a long one, ask once."""
         away = self.idle_now
+        if not away: self.last_active = current  # what the user was on when the input stopped, for the question on return
         if away and self.away_since is None:
             self.away_since = datetime.now()-timedelta(seconds=0 if locked else max(0, age-self.config["idle_seconds"]))
+            self.away_from = getattr(self, "last_active", None)
         elif not away and self.away_since is not None:
             began, self.away_since = self.away_since, None
             threshold = self.config["return_prompt_minutes"]*60; ended = datetime.now()
             if threshold and not self.paused and (ended-began).total_seconds() >= threshold:
                 self.close_return_prompt()
-                self.return_prompt = ReturnPrompt(self, began, ended)
+                self.return_prompt = ReturnPrompt(self, began, ended, getattr(self, "away_from", None))
                 # The card deletes itself when closed; drop the reference with it.
                 self.return_prompt.destroyed.connect(lambda *_: setattr(self, "return_prompt", None))
                 self.return_prompt.show()
@@ -700,14 +946,18 @@ class App(Shell):
         if self.return_prompt is not None and shiboken6.isValid(self.return_prompt): self.return_prompt.close()
         self.return_prompt = None
 
-    def count_away_as_work(self, began, ended):
+    def count_away_as(self, category, began, ended):
+        """The away stretch [began, ended] becomes work or distraction, under "离开期间（补记）"; undoable."""
         self.settle()
-        moved = self.store.move_minutes(began, ended, ("idle", "", ""), ("work", AWAY_LABEL, ""))
+        moved = self.store.move_minutes(began, ended, ("idle", "", ""), (category, AWAY_LABEL, ""))
         def undo():
-            self.settle(); self.store.move_minutes(began, ended, ("work", AWAY_LABEL, ""), ("idle", "", ""))
-            self.notify("已改回离开。"); self.manager_signature = None; self.refresh(force=True)
-        self.notify(f"已把离开的 {short_time(moved)} 算作工作", undo, seconds=8)
+            self.settle(); self.store.move_minutes(began, ended, (category, AWAY_LABEL, ""), ("idle", "", ""))
+            self.notify("已改回离开。"); self.records_changed(); self.refresh(force=True)
+        self.notify(f"已把这 {short_time(moved)} 算作{LABELS[category]}", undo, seconds=8)
         self.records_changed(); self.refresh(force=True)
+
+    def count_away_as_work(self, began, ended):
+        self.count_away_as("work", began, ended)
 
     def check_app_limits(self, today):
         """One reminder per program / website per day when its own daily limit is reached."""
@@ -879,6 +1129,7 @@ class App(Shell):
         elif index == 1 and (force or self.ticks % ANALYSIS_EVERY == 0): self.refresh_analysis()
         elif index == 2 and (force or self.ticks % MANAGER_EVERY == 0): self.refresh_manager()
         elif index == 3 and force and self.settings_stack.currentIndex() == 1: self.refresh_rules()
+        elif index == 3 and force and self.settings_stack.currentIndex() == 2: self.refresh_subs()
         elif index == 4: self.refresh_connection()
 
     def refresh_header(self):
@@ -1192,6 +1443,14 @@ class App(Shell):
             self.trend_chart.set_data(list(days.items())); self.trend_chart.set_mark(count-1 if last == today else None)
         self.range_rank.set_data([(label(app, host), host or app, cat, seconds) for app, host, cat, seconds, _ in self.store.range_apps(first_day, last_day)],
                                  present)
+        kind = self.sub_kind.currentData(); span = "前一天" if single else f"前 {count} 天"
+        now_subs = subcats.totals(self.store.range_rows(first_day, last_day), self.config)[kind]
+        then_subs = subcats.totals(self.store.range_rows(before_first.isoformat(), before_last.isoformat()), self.config)[kind]
+        self.sub_analysis.set_data(kind, f"{LABELS[kind]} {short_time(summed[kind])}" if summed[kind] >= 60 else LABELS[kind],
+                                   f"占{'当天' if single else '这段时间'}记录 {share(summed[kind], sum(counted.values()))}" if sum(counted.values()) else "",
+                                   self.sub_rows(kind, now_subs, summed[kind], then_subs, span=span, one_day=single),
+                                   ("这一天" if single else "这段时间")+("没有工作记录" if kind == "work" else "没有摸鱼，很专注"), 2,
+                                   heads=("合计" + (" / 上限" if single and kind == "distraction" and self.config["sub_limits"] else ""), "占比", "比"+span))
         profile_days, profile = self.store.hour_profile(first_day, last_day)
         hours = {f"{h:02d}": dict.fromkeys(CATEGORIES, 0.0) for h in range(24)}
         for hour, key, seconds in profile:
@@ -1306,7 +1565,8 @@ class App(Shell):
         self.session_table.setFixedHeight(self.session_table.horizontalHeader().height()+40*len(rows)+4)
 
     # ── activity management ───────────────────────────────────────────
-    def open_manager(self, category="", day=None, query="", timed=None):
+    def open_manager(self, category="", day=None, query="", timed=None, sub=None):
+        self.manager_sub = sub
         if timed is not None and timed != self.manager_timed():  # e.g. from the minute timeline: show when it happened
             self.manager_view.blockSignals(True); self.manager_view.setCurrentIndex(1 if timed else 0); self.manager_view.blockSignals(False)
             self.switch_manager_view()
@@ -1331,11 +1591,11 @@ class App(Shell):
         timed = self.manager_timed(); header = self.table.horizontalHeader()
         self.table.clearSelection(); self.table.setRowCount(0)
         self.table.setHorizontalHeaderLabels(["分类", "时间", "应用", "网站", "时长"] if timed else ["分类", "应用", "网站", "累计时长", "占当日"])
-        for column, width in enumerate([110, 150, 0, 0, 110] if timed else [110, 0, 0, 110, 90]):
+        for column, width in enumerate([160, 150, 0, 0, 110] if timed else [160, 0, 0, 110, 90]):
             header.setSectionResizeMode(column, header.ResizeMode.Fixed if width else header.ResizeMode.Stretch)
             if width: self.table.setColumnWidth(column, width)
         self.change_future.setVisible(not timed)  # a stretch is a one-off fix, never a rule
-        set_text(self.manager_hint, "每分钟归给占时最多的那一项 · 选中后“设为”只改这一段" if timed else "Ctrl / Shift 多选 · 右键更多操作 · 双击调整以后的规则")
+        set_text(self.manager_hint, "每分钟归给占时最多的那一项 · 选中后“设为”只改这一段" if timed else "Ctrl / Shift 多选 · 右键更多操作（改小类也在这里） · 双击调整以后的规则")
         self.manager_signature = None; self.manager_shown = None; self.refresh_manager(force=True)
 
     def records_changed(self):
@@ -1355,11 +1615,16 @@ class App(Shell):
         timed = self.manager_timed()
         # One shape for both views: (category, app, host, seconds, first minute, last minute); the last two are None per app.
         found = [(c, a, h, s, f, l) for f, l, c, a, h, s in self.store.segments(day)] if timed else [(*row, None, None) for row in self.store.details(day)]
+        subs = {(c, a, h): subcats.lookup(c, a, h, self.config) for c, a, h, *_ in found}
+        wanted = self.manager_sub
         rows = [row for row in found if (not category or row[0] == category)
-                and (not query or query in f"{row[1]} {row[2]} {app_name(row[1])} {site_name(row[2])}".lower())]
+                and (not wanted or (row[0] == wanted[0] and subs[row[:3]] == wanted[1]))
+                and (not query or query in f"{row[1]} {row[2]} {app_name(row[1])} {site_name(row[2])} {self.sub_name(row[0], subs[row[:3]]) if row[0] in subcats.SUB_CATEGORIES else ''}".lower())]
+        self.sub_chip.setVisible(bool(wanted))
+        if wanted: set_text(self.sub_chip, f"小类：{self.sub_name(*wanted)}")
         total = sum(self.store.totals(day).values())
         keys = tuple((c, a, h, f, l) for c, a, h, _, f, l in rows)
-        signature = (day, query, category, timed, keys)
+        signature = (day, query, category, timed, keys, wanted, tuple(subs[k[:3]] for k in keys))
         if not force and signature == self.manager_signature:
             # Same rows in the same order: update only the cells whose text changed.
             for index, row in enumerate(rows):
@@ -1381,6 +1646,7 @@ class App(Shell):
                 item = QTableWidgetItem(value)
                 if column == 0:
                     item.setData(Qt.ItemDataRole.UserRole, key); item.setData(CategoryDelegate.ROLE, cat)
+                    if subs[(cat, app, host)]: item.setData(CategoryDelegate.SUB, self.sub_name(cat, subs[(cat, app, host)]))
                 elif column == app_column:
                     item.setToolTip(app or "离开 / 锁屏")
                     if app: item.setIcon(appicons.icon_for(app, cat))
@@ -1474,6 +1740,13 @@ class App(Shell):
             menu.addAction(icon("target", ACCENT, 16), f"设置“{label(app, host)}”每日上限…", lambda k=host or app: self.set_app_limit(k))
             if app.endswith(".exe"): menu.addAction("给应用改名…", lambda a=app: self.rename_app(a))
             if host: menu.addAction("给网站改名…", lambda h=host: self.rename_site(h))
+        # 小类 for the selected records, when they are all 工作 or all 摸鱼
+        chosen = [k[:3] for k in self.selected_keys() if k[1] or k[2]]
+        cats = {c for c, _, _ in chosen}
+        if len(cats) == 1 and next(iter(cats)) in subcats.SUB_CATEGORIES:
+            category = next(iter(cats)); keys = list(dict.fromkeys(self.sub_key(a, h) for _, a, h in chosen))
+            current = {subcats.lookup(c, a, h, self.config) for c, a, h in chosen}
+            menu.addSeparator(); self.sub_menu(menu, category, keys, next(iter(current)) if len(current) == 1 else None)
         menu.exec(self.table.viewport().mapToGlobal(position))
 
     # ── rules and settings ────────────────────────────────────────────
@@ -1536,7 +1809,13 @@ class App(Shell):
         selected = self.rule_entries[row][0] if 0 <= row < len(getattr(self, "rule_entries", [])) else None
         everything = sorted(entries.items(), key=lambda x: (x[1][1] != "自定义", x[0][0], x[0][1]))
         query = self.rule_search.text().strip().lower(); custom_only = self.custom_only.isChecked(); wanted = self.rule_filter.currentData()
-        self.rule_entries = [e for e in everything if (not custom_only or e[1][1] == "自定义") and (not query or query in e[0][1] or query in key_name(e[0][1]).lower())
+        def sub_of(entry):
+            (kind, key), (category, _) = entry
+            if kind == "surface" or category not in subcats.SUB_CATEGORIES: return ""
+            sid = subcats.lookup(category, key if kind == "app" else "", key if kind == "host" else "", self.config)
+            return self.sub_name(category, sid) if sid else ""
+        self.rule_entries = [e for e in everything if (not custom_only or e[1][1] == "自定义")
+                             and (not query or query in e[0][1] or query in key_name(e[0][1]).lower() or query in sub_of(e).lower())
                              and (not wanted or e[1][0] == wanted)]
         self.rules_table.setRowCount(len(self.rule_entries)); self.icon_queue = []
         for row, ((kind, key), (category, source)) in enumerate(self.rule_entries):
@@ -1546,7 +1825,9 @@ class App(Shell):
                                          f"{shown}（{key}）" if shown != key else key,
                                          f"{limit} 分钟" if limit else "—", source]):
                 item = QTableWidgetItem(value)
-                if col == 0: item.setData(CategoryDelegate.ROLE, category)
+                if col == 0:
+                    item.setData(CategoryDelegate.ROLE, category); sub = sub_of(((kind, key), (category, source)))
+                    if sub: item.setData(CategoryDelegate.SUB, sub)
                 if col == 2 and kind in ("app", "host"):
                     # Icons not loaded yet are filled in a few at a time, so the page opens at once.
                     if appicons.ready(key, category): item.setIcon(appicons.icon_for(key, category))
@@ -1589,6 +1870,8 @@ class App(Shell):
         menu.addAction(icon("target", ACCENT, 16), f"每日上限…（现在 {limit} 分钟）" if limit else "每日上限…", lambda: self.set_app_limit(key))
         if kind == "host": menu.addAction("给网站改名…", lambda: self.rename_site(key))
         elif kind == "app": menu.addAction("给应用改名…", lambda: self.rename_app(key))
+        if category in subcats.SUB_CATEGORIES and kind in ("app", "host"):
+            self.sub_menu(menu, category, [key], subcats.lookup(category, key if kind == "app" else "", key if kind == "host" else "", self.config))
         reset = menu.addAction("恢复默认", self.remove_rule); reset.setEnabled(source == "自定义")
         if where is None:
             cell = self.rules_table.visualRect(self.rules_table.model().index(row, 0))
@@ -1836,7 +2119,7 @@ class App(Shell):
             self.goal_flags["work"] = True
             self.notify(f"今日工作目标 {short_time(goal)} 已完成。", label="")
             self.tray_message("工作目标已完成", f"今天已工作 {short_time(totals['work'])}。", QSystemTrayIcon.MessageIcon.Information, 5000)
-        self.check_app_limits(today)
+        self.check_app_limits(today); self.check_sub_limits(today)
         if limit and totals["distraction"] > limit and not self.goal_flags.get("limit"):
             self.goal_flags["limit"] = True
             self.notify(f"今天摸鱼已超过 {short_time(limit)} 的上限。", label="")

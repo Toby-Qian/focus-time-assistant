@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parent
 NAME = "专注时间助手"
 WORK = ROOT/"90_过程文件"/"2026-11-10_打包"
 OUTPUT = ROOT/"程序"
-VERSION = (1, 1, 0, 0)
+VERSION = (1, 2, 0, 0)
 
 
 def make_icon(path):

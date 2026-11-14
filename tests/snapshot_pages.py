@@ -48,7 +48,7 @@ for back in range(1, 60):
 for back, task, done in ((0, "论文第三节", True), (0, "", False), (1, "复习高数", True), (2, "论文第三节", True)):
     begun = start-timedelta(days=back)+timedelta(minutes=30)
     w.store.add_session(begun, 25, 1500 if done else 640, 1380 if done else 600, 60, done, task)
-w.config["work_goal_minutes"] = 120
+w.config["work_goal_minutes"] = 120; w.config["sub_limits"] = {"video": 10}
 w.current = Activity("distraction", "chrome.exe", "www.bilibili.com", "B站", "域名识别")
 if size: w.resize(*size)
 # Render without putting a window on the user's screen (and without catching their clicks).
@@ -76,6 +76,7 @@ def shoot():
             w.rhythm_mode.setCurrentIndex(0); q.processEvents()
             w.toggle_away(); settle(); w.grab().save(str(out/"1c_without_away.png"))
             w.toggle_away(); q.processEvents()
+            assert w.pages.currentWidget().verticalScrollBar().maximum() == 0, "总览需要滚动"
         if index == 2:
             w.notify("已设为工作：修正 1 条记录，以后也这样记录", lambda: None); q.processEvents()
             w.grab().save(str(out/"3b_toast.png")); w.toast.hide()
@@ -83,7 +84,8 @@ def shoot():
             assert w.table.horizontalHeaderItem(1).text() == "时间" and not w.change_future.isVisibleTo(w)
             w.manager_view.setCurrentIndex(0); q.processEvents()
         if index == 3:
-            w.switch_settings(1); settle(); w.grab().save(str(out/"4b_rules.png")); w.switch_settings(0); q.processEvents()
+            w.switch_settings(1); settle(); w.grab().save(str(out/"4b_rules.png"))
+            w.switch_settings(2); settle(); w.grab().save(str(out/"4c_subs.png")); w.switch_settings(0); q.processEvents()
     from desktop import Reminder, FocusDialog, ManualDialog, RangeDialog, WelcomeDialog
     today = datetime.now().date().isoformat()
     for name, dialog in (("9_manual_dialog", ManualDialog(w, today, 14*60, 15*60+30, 23*60)), ("9b_range_dialog", RangeDialog(w, "2026-10-01", "2026-10-20", None)),
@@ -99,18 +101,25 @@ def shoot():
     w.navigate(1); settle(); area = w.pages.currentWidget()
     if isinstance(area, QScrollArea): area.verticalScrollBar().setValue(area.verticalScrollBar().maximum()); settle(.2)
     w.grab().save(str(out/"2b_analysis_lower.png"))
+    w.range_combo.setCurrentIndex(3); settle(); bar = area.verticalScrollBar(); bar.setValue(w.sub_analysis.parentWidget().y()-200); settle(.2)
+    w.grab().save(str(out/"2h_analysis_subs.png")); w.sub_kind.setCurrentIndex(1); settle(.2); w.grab().save(str(out/"2i_analysis_subs_play.png")); w.sub_kind.setCurrentIndex(0)
     bar = area.verticalScrollBar(); bar.setValue(bar.maximum()//2); settle(.2); w.grab().save(str(out/"2c_analysis_middle.png"))
     w.choose_custom("lastweek"); settle(); bar.setValue(0); settle(.2); w.grab().save(str(out/"2f_last_week.png"))
     assert w.more_range.isChecked() and w.more_range.text() == "上周" and w.analysis_span()[0] == 7
     w.choose_custom("custom", (start-timedelta(days=50)).date().isoformat(), start.date().isoformat()); settle()
     bar.setValue(bar.maximum()//3); settle(.2); w.grab().save(str(out/"2g_custom_51_days.png"))
     w.show_analysis_day(datetime.now().date().isoformat()); settle()  # today: the hour mark path
+    w.analysis_view.verticalScrollBar().setValue(0); settle(.2); w.heatmap.parentWidget().grab().save(str(out/"2j_calendar_today_picked.png"))
     assert w.analysis_custom is None and not w.more_range.isChecked()
     assert w.analysis_dates()[0] == datetime.now().date().isoformat() and "前一天" in w.compare_title.text()
     w.show_analysis_day((start-timedelta(days=5)).date().isoformat()); settle(); w.grab().save(str(out/"2d_analysis_day.png"))
     bar.setValue(bar.maximum()//2); settle(.2); w.grab().save(str(out/"2e_analysis_day_middle.png"))
     from desktop import Reminder
     popup = Reminder(w, w.current); popup.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen); popup.show(); q.processEvents(); popup.grab().save(str(out/"6_reminder.png")); popup.close()
+    from desktop import ReturnPrompt
+    back = datetime.now().replace(second=0, microsecond=0)
+    for name, before in (("6b_return_watching", Activity("distraction", "chrome.exe", "www.bilibili.com")), ("6c_return_working", Activity("work", "code.exe"))):
+        card = ReturnPrompt(w, back-timedelta(minutes=42), back, before); card.show(); q.processEvents(); card.grab().save(str(out/f"{name}.png")); card.close()
     print("saved", out, "dpr", w.devicePixelRatioF())
     w.shutdown(); q.quit()
 

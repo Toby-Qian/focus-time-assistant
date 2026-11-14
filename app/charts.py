@@ -17,7 +17,7 @@ def hide_tooltip():
     for widget in QApplication.topLevelWidgets():
         if widget.objectName() == "qtooltip_label" and widget.isVisible(): widget.hide()
 from core import CATEGORIES
-from theme import ACCENT, COLORS, INK, LINE, MUTED, P, SUBTLE, font
+from theme import ACCENT, COLORS, INK, LINE, MUTED, P, SUBTLE, TEXTS, font
 
 STEPS = [60, 120, 300, 600, 900, 1200, 1800, 3600, 7200, 10800, 14400, 21600]
 
@@ -363,6 +363,120 @@ class RankList(QWidget):
             self.chosen.emit(row[1])
 
 
+class SubBars(QWidget):
+    """One category split into its 小类: a stacked bar, then a row per subcategory (swatch, name,
+    bar, and right-aligned number columns). Painted as one widget, like RankList.
+
+    Rows are (id, name, seconds, colour, cells, tip); a cell is (text, colour or None). Rows with
+    the same number of cells line up in columns; `heads` names those columns above the rows.
+    """
+    chosen = Signal(str, str)  # category, subcategory id
+    ROW = 30
+
+    def __init__(self, header=True):
+        super().__init__(); self.header = header; self.setMouseTracking(True)
+        self.category = "work"; self.title = ""; self.right = ""; self.rows = []; self.heads = []; self.empty = ""; self.lines = 3
+        self.hover = None; self.signature = None
+        self.setFixedHeight(self.height_for(self.lines))
+
+    def top(self):
+        return (32 if self.header else 0)+10+14+(22 if self.heads else 0)
+
+    def height_for(self, count):
+        return self.top()+count*self.ROW
+
+    def set_data(self, category, title, right, rows, empty="", lines=3, heads=()):
+        signature = (category, title, right, tuple((r[0], r[1], int(r[2]), r[3], tuple(r[4]), r[5]) for r in rows), empty, lines, tuple(heads))
+        if signature == self.signature: return
+        self.signature = signature
+        self.category, self.title, self.right, self.rows, self.empty, self.heads = category, title, right, list(rows), empty, list(heads)
+        self.lines = max(lines, len(rows), 1); self.setFixedHeight(self.height_for(self.lines)); self.update()
+
+    def layout_columns(self, p):
+        """x of the bar's end and the right edge of every number column, from the widest text in each."""
+        p.setFont(font(13, family="num")); fm = p.fontMetrics()
+        count = max([len(r[4]) for r in self.rows]+[len(self.heads)])
+        widths = [0]*count
+        for row in self.rows:
+            for i, (text, _) in enumerate(row[4]): widths[i] = max(widths[i], fm.horizontalAdvance(text))
+        p.setFont(font(12)); fm = p.fontMetrics()
+        for i, head in enumerate(self.heads): widths[i] = max(widths[i], fm.horizontalAdvance(head))
+        rights, x = [], float(self.width())
+        for width in reversed(widths):
+            rights.insert(0, x); x -= width+16
+        return x, rights, widths
+
+    def paintEvent(self, _):
+        p = QPainter(self); p.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.TextAntialiasing)
+        width = self.width(); y = 0.0; left = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter; right = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        if self.header:
+            p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(COLORS[self.category])); p.drawEllipse(QRectF(0, 7, 8, 8))
+            p.setFont(font(14, QFont.Weight.DemiBold)); p.setPen(QColor(TEXTS[self.category]))
+            p.drawText(QRectF(16, 0, width*.7, 22), left, self.title)
+            p.setFont(font(13)); p.setPen(QColor(MUTED)); p.drawText(QRectF(width*.5, 0, width*.5, 22), right, self.right)
+            y = 32
+        total = sum(r[2] for r in self.rows)
+        p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(P["track"])); p.drawRoundedRect(QRectF(0, y, width, 10), 5, 5)
+        if total:
+            shape = QPainterPath(); shape.addRoundedRect(QRectF(0, y, width, 10), 5, 5)
+            p.save(); p.setClipPath(shape); x = 0.0
+            for i, row in enumerate(self.rows):
+                part = width*row[2]/total
+                p.fillRect(QRectF(x, y, part, 10), QColor(row[3]))
+                if i and part > 3: p.fillRect(QRectF(x-.75, y, 1.5, 10), QColor(P["card"]))
+                x += part
+            p.restore()
+        y += 10+14
+        if not self.rows:
+            p.setFont(font(13)); p.setPen(QColor(MUTED)); p.drawText(QRectF(0, y, width, self.ROW), left, self.empty); return
+        bar_end, rights, widths = self.layout_columns(p)
+        p.setFont(font(14)); fm = p.fontMetrics()
+        name_width = min(max(fm.horizontalAdvance(r[1]) for r in self.rows), width*.32)
+        bar_left = 18+name_width+12; bar_right = bar_end-4
+        if self.heads:
+            p.setFont(font(12)); p.setPen(QColor(SUBTLE))
+            for head, edge, w in zip(self.heads, rights, widths):
+                if head: p.drawText(QRectF(edge-w-2, y, w+2, 16), right, head)
+            y += 22
+        top = max(1.0, max(r[2] for r in self.rows))
+        for index, (sid, name, seconds, colour, cells, _) in enumerate(self.rows):
+            row_y = y+index*self.ROW
+            if index == self.hover:
+                p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(P["row_hover"])); p.drawRoundedRect(QRectF(-6, row_y, width+12, self.ROW), 6, 6)
+            p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(colour)); p.drawRoundedRect(QRectF(0, row_y+self.ROW/2-4, 8, 8), 2, 2)
+            p.setFont(font(14)); p.setPen(QColor(INK if sid else MUTED))
+            p.drawText(QRectF(18, row_y, name_width+2, self.ROW), left, p.fontMetrics().elidedText(name, Qt.TextElideMode.ElideRight, int(name_width+2)))
+            if bar_right-bar_left > 20:
+                p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(P["track"]))
+                p.drawRoundedRect(QRectF(bar_left, row_y+self.ROW/2-3, bar_right-bar_left, 6), 3, 3)
+                p.setBrush(QColor(colour)); p.drawRoundedRect(QRectF(bar_left, row_y+self.ROW/2-3, max(6, (bar_right-bar_left)*seconds/top), 6), 3, 3)
+            p.setFont(font(13, family="num"))
+            for (text, tone), edge, w in zip(cells, rights, widths):
+                p.setPen(QColor(tone or MUTED)); p.drawText(QRectF(edge-w-2, row_y, w+2, self.ROW), right, text)
+
+    def row_at(self, point):
+        if not self.rows: return None
+        y = point.y()-self.top()
+        index = int(y//self.ROW) if y >= 0 else -1
+        return index if 0 <= index < len(self.rows) else None
+
+    def mouseMoveEvent(self, event):
+        index = self.row_at(event.position())
+        if index == self.hover: return
+        self.hover = index; self.update()
+        self.setCursor(Qt.CursorShape.PointingHandCursor if index is not None else Qt.CursorShape.ArrowCursor)
+        if index is None: hide_tooltip()
+        else: QToolTip.showText(event.globalPosition().toPoint(), self.rows[index][5], self)
+
+    def leaveEvent(self, _):
+        if self.hover is not None: self.hover = None; self.update()
+
+    def mousePressEvent(self, event):
+        index = self.row_at(event.position())
+        if index is not None and event.button() == Qt.MouseButton.LeftButton:
+            self.hover = None; hide_tooltip(); self.update(); self.chosen.emit(self.category, self.rows[index][0])
+
+
 class Timeline(QWidget):
     """Today minute by minute: each recorded minute coloured by what filled most of it."""
     chosen = Signal(str)
@@ -523,9 +637,14 @@ class Heatmap(QWidget):
         p = QPainter(self); p.drawPixmap(0, 0, self._base[1])
         # Rings: the day being analysed (black), the hovered day (thin black), today (grey).
         p.setRenderHint(QPainter.RenderHint.Antialiasing); p.setBrush(Qt.BrushStyle.NoBrush)
+        # One ring per cell, the strongest wins: picked (black, thick) > hovered (black, thin) > today (grey).
+        # (The picked ring used to be skipped when the picked day was today, leaving today with no ring.)
+        rings = {}
         for iso, colour, width in ((self.today, MUTED, 1.2), (self.hover, INK, 1.2), (self.picked, INK, 2.0)):
-            rect = self.rect_of(iso) if iso else None
-            if rect is None or (iso == self.today and iso in (self.hover, self.picked)) or (iso == self.hover and iso == self.picked): continue
+            if iso: rings[iso] = (colour, width)
+        for iso, (colour, width) in rings.items():
+            rect = self.rect_of(iso)
+            if rect is None: continue
             p.setPen(QPen(QColor(colour), width)); p.drawRoundedRect(rect.adjusted(-1.5, -1.5, 1.5, 1.5), 4.5, 4.5)
 
     def paint_grid(self, p):

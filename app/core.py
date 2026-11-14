@@ -10,6 +10,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import subcats
+
 # "system" (系统工具) is neutral: recorded, but left out of the focus ratio like 离开.
 CATEGORIES = {"work": "工作", "distraction": "摸鱼", "system": "系统工具", "idle": "离开", "unknown": "待分类"}
 EXPORT_PARTS = {"daily": "每日汇总", "apps": "应用与网站排行", "hours": "一天中的时段分布", "sessions": "专注记录", "details": "每日应用明细"}
@@ -49,11 +51,13 @@ DEFAULTS = {
     "remind_distraction": True, "reminder_sound": True, "learning_minutes": 30,
     "tray_hint": False,  # system notification "still recording" when the window is closed to the tray
     "daily_summary": "off",  # "off" or the HH:MM at which today's summary is shown once
-    "return_prompt_minutes": 15,  # back after at least this long away: offer to count it as work (0 = never)
+    "return_prompt_minutes": 15,  # back after at least this long away: ask whether it was work, distraction or away (0 = never)
     "app_limits": {},  # {"x.exe" or "domain": daily minutes} — one reminder when reached
     "app_names": {},  # {"x.exe": "display name"} — the user's own names for programs
     "site_names": {},  # {"domain": "display name"} — the user's own names for websites (subdomains included)
     "overview_away": True,  # overview shares, ring and hourly bars include away time
+    # 小类 of 工作 / 摸鱼 (see subcats.py): the list, the user's program / website choices, daily limits by id.
+    "subcategories": subcats.default_list(), "sub_rules": {}, "sub_limits": {},
     "work_goal_minutes": 360, "distraction_limit_minutes": 30, "focus_minutes": 25, "rest_after_minutes": 0,
     # Focus sessions: a short break after each completed session (0 = none), the floating timer,
     # recently used task names (newest first) and where the floating timer was left.
@@ -136,6 +140,7 @@ def validate_config(config: dict):
         if not isinstance(names, dict) or any(not isinstance(k, str) or not 0 < len(k) <= 253 or not isinstance(v, str) or not 0 < len(v.strip()) <= 30
                                               for k, v in names.items()):
             config[key] = {}
+    subcats.validate(config)
     if not isinstance(config.get("overview_away"), bool):
         config["overview_away"] = True
     if config.get("daily_summary") not in ("off", "18:00", "20:00", "21:00", "22:00", "23:00"):
@@ -485,6 +490,11 @@ class Store:
             self.db.execute("INSERT INTO corrections(day,payload,created) VALUES (?,?,?)",
                             (day, json.dumps(payload), datetime.now().isoformat(timespec="seconds")))
         return moved+extra
+
+    def range_rows(self, first: str, last: str):
+        """(category, app, host, seconds) summed over the days first..last."""
+        return self.db.execute("""SELECT category,app,host,SUM(seconds) FROM usage WHERE day>=? AND day<=?
+            GROUP BY category,app,host""", (first, last)).fetchall()
 
     def used_today(self, day: str, key: str) -> float:
         """Seconds on `day` for a program ("x.exe") or a website and its subdomains, across categories."""

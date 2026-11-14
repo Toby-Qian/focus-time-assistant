@@ -84,6 +84,24 @@ BG = CARD = LINE = INK = MUTED = SUBTLE = ACCENT = ACCENT_SOFT = ""
 THEME = "indigo"
 
 
+def _mix(a, b, t):
+    ra = [int(a.lstrip("#")[i:i+2], 16) for i in (0, 2, 4)]; rb = [int(b.lstrip("#")[i:i+2], 16) for i in (0, 2, 4)]
+    return "#"+"".join(f"{round(x+(y-x)*t):02X}" for x, y in zip(ra, rb))
+
+
+def sub_colors(category, count):
+    """`count` shades of a category colour for its 小类, strongest first, in both light and dark themes.
+
+    The first is a little deeper than the category colour, the last a soft tint of it; 其他 (no
+    subcategory) is drawn in the neutral idle grey instead.
+    """
+    base = COLORS[category]
+    deep = _mix(base, "#FFFFFF" if P["dark"] else "#000000", .22)
+    soft = _mix(base, P["card"], .58)
+    if count <= 1: return [deep][:count]
+    return [_mix(deep, soft, i/(count-1)) for i in range(count)]
+
+
 def palette(name):
     if name == "dark":
         return dict(DARK), CATEGORY_DARK
@@ -109,7 +127,8 @@ APP_NAMES = {"codex.exe": "Codex", "chatgpt.exe": "Codex / ChatGPT", "claude.exe
 
 
 # Display names for common websites; a domain also covers its subdomains (the longest match wins).
-SITE_NAMES = {"douyin.com": "抖音", "iesdouyin.com": "抖音", "xiaohongshu.com": "小红书", "xhslink.com": "小红书",
+SITE_NAMES = {"leetcode.cn": "力扣", "leetcode.com": "LeetCode", "runoob.com": "菜鸟教程", "cnblogs.com": "博客园", "juejin.cn": "稀土掘金", "kdocs.cn": "金山文档", "shimo.im": "石墨文档", "docs.qq.com": "腾讯文档", "wanfangdata.com.cn": "万方数据", "cqvip.com": "维普", "semanticscholar.org": "Semantic Scholar", "science.org": "Science", "mdpi.com": "MDPI", "ncbi.nlm.nih.gov": "PubMed", "x-mol.com": "X-MOL", "kimi.moonshot.cn": "Kimi", "tongyi.aliyun.com": "通义", "yuanbao.tencent.com": "腾讯元宝", "yiyan.baidu.com": "文心一言", "gemini.google.com": "Gemini", "chat.openai.com": "ChatGPT", "xuetangx.com": "学堂在线", "yuketang.cn": "雨课堂", "zhihuishu.com": "智慧树", "coursera.org": "Coursera", "tiktok.com": "TikTok", "mgtv.com": "芒果TV", "netflix.com": "Netflix", "4399.com": "4399 小游戏", "7k7k.com": "7k7k 小游戏", "store.steampowered.com": "Steam 商店", "weibo.cn": "微博", "yangkeduo.com": "拼多多", "goofish.com": "闲鱼", "dewu.com": "得物", "vip.com": "唯品会", "amazon.com": "亚马逊", "amazon.cn": "亚马逊", "toutiao.com": "今日头条", "sina.com.cn": "新浪", "sohu.com": "搜狐", "thepaper.cn": "澎湃新闻", "hupu.com": "虎扑", "ifeng.com": "凤凰网", "36kr.com": "36氪", "news.163.com": "网易新闻", "channels.weixin.qq.com": "视频号", "figma.com": "Figma",
+              "douyin.com": "抖音", "iesdouyin.com": "抖音", "xiaohongshu.com": "小红书", "xhslink.com": "小红书",
               "bilibili.com": "B站", "b23.tv": "B站", "kuaishou.com": "快手", "ixigua.com": "西瓜视频",
               "weibo.com": "微博", "zhihu.com": "知乎", "douban.com": "豆瓣", "tieba.baidu.com": "百度贴吧",
               "baidu.com": "百度", "qq.com": "腾讯", "v.qq.com": "腾讯视频", "mail.qq.com": "QQ 邮箱", "iqiyi.com": "爱奇艺", "youku.com": "优酷",
@@ -127,9 +146,15 @@ SITE_ALIASES = {}  # the user's own names, set from settings ("site_names"); the
 
 
 def _site_lookup(host, names):
+    """The name of the longest known domain that is `host` or one of its parents. Walks the host's
+    own suffixes (a few dict lookups) instead of testing every known domain against it."""
     host = host.lower()
-    match = max((d for d in names if host == d or host.endswith("."+d)), key=len, default=None)
-    return names[match] if match else ""
+    while host:
+        if host in names: return names[host]
+        dot = host.find(".")
+        if dot < 0: return ""
+        host = host[dot+1:]
+    return ""
 
 
 def site_name(host):
@@ -372,6 +397,11 @@ def _draw(p, kind, color):
     elif kind == "pen":  # time entered by hand
         path = QPainterPath(QPointF(4, 20)); path.lineTo(5, 15.5); path.lineTo(15.5, 5); path.lineTo(19, 8.5); path.lineTo(8.5, 19); path.closeSubpath()
         p.drawPath(path); p.drawLine(QPointF(13.5, 7), QPointF(17, 10.5))
+    elif kind == "close":
+        p.drawLine(7, 7, 17, 17); p.drawLine(17, 7, 7, 17)
+    elif kind == "tags":  # 小类
+        path = QPainterPath(QPointF(4, 4)); path.lineTo(11, 4); path.lineTo(20, 13); path.lineTo(13, 20); path.lineTo(4, 11); path.closeSubpath()
+        p.drawPath(path); p.drawEllipse(QRectF(7, 7, 2.6, 2.6))
     elif kind == "plus":
         p.drawLine(12, 5, 12, 19); p.drawLine(5, 12, 19, 12)
     elif kind == "down":
