@@ -141,7 +141,7 @@ python -m venv .venv
 
 ## 版本记录
 
-见 [CHANGELOG.md](CHANGELOG.md)。当前版本 1.2（2026-11-14）。
+见 [CHANGELOG.md](CHANGELOG.md)。当前版本 1.2.1（2026-11-15）。
 
 ## 许可证
 

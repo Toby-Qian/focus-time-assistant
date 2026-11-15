@@ -168,8 +168,9 @@ def check():
         assert set(w.return_prompt.choices)=={"idle","distraction","work"} and w.return_prompt.choices["distraction"].property("role")=="primary","回来补记的选项不对"
         w.return_prompt.choices["idle"].click(); q.processEvents(); assert w.return_prompt is None
         distracted=now-timedelta(hours=5); w.store.add(distracted,distracted+timedelta(minutes=12),A("idle")); w.store.flush()
-        before=w.store.totals(day); w.count_away_as("distraction",distracted,distracted+timedelta(minutes=12))
+        before=w.store.totals(day); w.count_away_as("distraction",distracted,distracted+timedelta(minutes=12),A("distraction","chrome.exe","www.bilibili.com"))
         after=w.store.totals(day); assert after["distraction"]-before["distraction"]>=700 and before["idle"]-after["idle"]>=700,"算作摸鱼没有生效"
+        assert any(r[:3]==("distraction","chrome.exe","www.bilibili.com") and r[3]>=700 for r in w.store.details(day)),"补记没有记在离开前的程序名下"
         w.toast.run_action(); assert abs(w.store.totals(day)["distraction"]-before["distraction"])<1,"算作摸鱼撤销失败"
         away=now-timedelta(hours=3); w.store.add(away,away+timedelta(minutes=18),A("idle")); w.store.flush()
         idle_before=w.store.totals(day)["idle"]; w.count_away_as_work(away,away+timedelta(minutes=18))

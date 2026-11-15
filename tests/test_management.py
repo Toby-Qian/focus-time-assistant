@@ -76,6 +76,20 @@ class ManagementTests(unittest.TestCase):
         t=self.store.totals(self.day); self.assertEqual((t["idle"],t["work"]),(90,0))
         self.assertEqual(self.store.details(self.day)[0][:2],("idle",""))
 
+    def test_away_filed_under_the_program_before_and_undone_exactly(self):
+        # 30 s of the film in the browser, then 90 s away in the same and next minute.
+        film=Activity("distraction","chrome.exe","www.bilibili.com")
+        self.store.add(self.start,self.start+timedelta(seconds=30),film)
+        self.store.add(self.start+timedelta(seconds=30),self.start+timedelta(seconds=120),Activity("idle"))
+        moves=[]; target=("work","chrome.exe","www.bilibili.com")
+        moved=self.store.move_minutes(self.start,self.start+timedelta(seconds=120),("idle","",""),target,moves)
+        self.assertAlmostEqual(moved,90); t=self.store.totals(self.day); self.assertEqual((t["idle"],t["work"]),(0,90))
+        self.assertIn(("work","chrome.exe","www.bilibili.com"),{r[:3] for r in self.store.details(self.day)})
+        self.store.add(self.start+timedelta(seconds=120),self.start+timedelta(seconds=150),Activity("work","chrome.exe","www.bilibili.com"))  # back at it
+        self.store.unmove(moves,target,("idle","",""))
+        t=self.store.totals(self.day); self.assertEqual((t["idle"],t["work"],t["distraction"]),(90,30,30))
+        self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM minute_usage WHERE seconds<0.000001").fetchone()[0],0)
+
     def test_undo_of_a_record_from_before_away_relabelling(self):
         import json
         self.add("unknown",60); self.store.reclassify(self.day,[("unknown","code.exe","")],"work")

@@ -25,7 +25,7 @@ from PySide6.QtCore import Qt, QByteArray, QDate, QSize, QTimer, QUrl
 from PySide6.QtGui import QColor, QCursor, QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QApplication, QWidget, QFrame, QVBoxLayout, QHBoxLayout, QTableWidgetItem, QMessageBox,
     QDialog, QFormLayout, QComboBox, QLineEdit, QDialogButtonBox, QSystemTrayIcon, QMenu, QGraphicsDropShadowEffect,
-    QCheckBox, QDateEdit, QSpinBox)
+    QCheckBox, QDateEdit, QLabel, QSpinBox)
 from core import Activity, Accountant, CATEGORIES, IGNORE, LABELS, OWN_WINDOW_MODES, RULE_TARGETS, Store, SITES, classify, hostname, load_config, save_config, streaks
 from core import SURFACES, SURFACE_TARGETS, SURFACE_PREFIX
 from insights import insights, work_rhythm
@@ -279,19 +279,26 @@ class ReturnPrompt(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating); self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         if owner.testing: self.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
-        self.owner, self.began, self.ended = owner, began, ended
+        self.owner, self.began, self.ended, self.before = owner, began, ended, before
         outer = QVBoxLayout(self); outer.setContentsMargins(14, 10, 14, 18)
         body = QFrame(); body.setObjectName("card"); outer.addWidget(body)
         layout = QVBoxLayout(body); layout.setContentsMargins(18, 16, 18, 14); layout.setSpacing(6)
         minutes = round((ended-began).total_seconds()/60)
         layout.addWidget(text(f"刚才 {minutes} 分钟没有操作，这段在做什么？", "heading"))
         name = (site_name(before.host) if before.host else before.site) or app_name(before.app) if before and (before.app or before.host) else ""
-        layout.addWidget(text(f"{began:%H:%M} – {ended:%H:%M}" + (f"，之前在用“{name}”" if name else "") +
-                              "。看视频、开会、看纸质资料时，电脑会以为你离开了。", "muted", wrap=True))
+        app, host = owner.away_owner(before); filed = "" if app == AWAY_LABEL else label(app, host)
+        where = (f"，之前在用“{name}”" if name else "") + (("，算作工作或摸鱼都记在它名下" if filed == name else f"，算作工作或摸鱼会记在“{filed}”名下") if filed else "")
+        detail = text(f"{began:%H:%M} – {ended:%H:%M}{where}。看视频、开会、看纸质资料时，电脑会以为你离开了。", "muted", wrap=True)
+        if filed:  # the program's own icon, the one the time will carry in the records
+            line = QHBoxLayout(); line.setSpacing(10); badge = QLabel(); badge.setFixedSize(22, 22)
+            badge.setPixmap(appicons.icon_for(host or app, before.category).pixmap(QSize(22, 22)))
+            line.addWidget(badge, 0, Qt.AlignmentFlag.AlignTop); line.addWidget(detail, 1); layout.addLayout(line)
+        else:
+            layout.addWidget(detail)
         suggested = "distraction" if before and before.category == "distraction" else "work"
         row = QHBoxLayout(); row.setSpacing(8); row.addStretch(); self.choices = {}
-        for key, label in (("idle", "保持离开"), ("distraction", "算作摸鱼"), ("work", "算作工作")):
-            choice = button(label, lambda checked=False, k=key: self.choose(k), key == suggested)
+        for key, caption in (("idle", "保持离开"), ("distraction", "算作摸鱼"), ("work", "算作工作")):
+            choice = button(caption, lambda checked=False, k=key: self.choose(k), key == suggested)
             if key != "idle": choice.setIcon(icon(key, P["on_accent"] if key == suggested else COLORS[key], 16))
             self.choices[key] = choice; row.addWidget(choice)
         layout.addSpacing(6); layout.addLayout(row); self.setFixedWidth(420)
@@ -301,9 +308,9 @@ class ReturnPrompt(QWidget):
         self.move(area.right()-self.width()-8, area.bottom()-self.height()-8)
 
     def choose(self, category):
-        owner, began, ended = self.owner, self.began, self.ended
+        owner, began, ended, before = self.owner, self.began, self.ended, self.before
         self.close()
-        if category != "idle": owner.count_away_as(category, began, ended)
+        if category != "idle": owner.count_away_as(category, began, ended, before)
 
     def paintEvent(self, _):
         from PySide6.QtGui import QPainter
@@ -946,14 +953,25 @@ class App(Shell):
         if self.return_prompt is not None and shiboken6.isValid(self.return_prompt): self.return_prompt.close()
         self.return_prompt = None
 
-    def count_away_as(self, category, began, ended):
-        """The away stretch [began, ended] becomes work or distraction, under "离开期间（补记）"; undoable."""
+    @staticmethod
+    def away_owner(before):
+        """(app, host) the away stretch is filed under: the program or site in use when the input stopped
+        (a film in the browser, a lecture in the player), so it keeps that icon, name and subcategory.
+        Without one (desktop, this program's own window, nothing seen yet) it is "离开期间（补记）"."""
+        if before is None or before.category in ("idle", IGNORE) or not before.app: return AWAY_LABEL, ""
+        if before.app.startswith(SURFACE_PREFIX) or before.app == "专注时间助手.exe": return AWAY_LABEL, ""
+        return before.app, before.host
+
+    def count_away_as(self, category, began, ended, before=None):
+        """The away stretch [began, ended] becomes work or distraction, under the program in use before; undoable."""
         self.settle()
-        moved = self.store.move_minutes(began, ended, ("idle", "", ""), (category, AWAY_LABEL, ""))
+        target = (category, *self.away_owner(before)); moves = []
+        moved = self.store.move_minutes(began, ended, ("idle", "", ""), target, moves)
         def undo():
-            self.settle(); self.store.move_minutes(began, ended, (category, AWAY_LABEL, ""), ("idle", "", ""))
+            self.settle(); self.store.unmove(moves, target, ("idle", "", ""))
             self.notify("已改回离开。"); self.records_changed(); self.refresh(force=True)
-        self.notify(f"已把这 {short_time(moved)} 算作{LABELS[category]}", undo, seconds=8)
+        filed = "" if target[1] == AWAY_LABEL else f"，记在“{label(target[1], target[2])}”名下"
+        self.notify(f"已把这 {short_time(moved)} 算作{LABELS[category]}{filed}", undo, seconds=8)
         self.records_changed(); self.refresh(force=True)
 
     def count_away_as_work(self, began, ended):

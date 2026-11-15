@@ -118,7 +118,8 @@ def shoot():
     popup = Reminder(w, w.current); popup.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen); popup.show(); q.processEvents(); popup.grab().save(str(out/"6_reminder.png")); popup.close()
     from desktop import ReturnPrompt
     back = datetime.now().replace(second=0, microsecond=0)
-    for name, before in (("6b_return_watching", Activity("distraction", "chrome.exe", "www.bilibili.com")), ("6c_return_working", Activity("work", "code.exe"))):
+    for name, before in (("6b_return_watching", Activity("distraction", "chrome.exe", "www.bilibili.com")), ("6c_return_working", Activity("work", "code.exe")),
+                         ("6d_return_title_only", Activity("distraction", "chrome.exe", site="B站")), ("6e_return_nothing", None)):
         card = ReturnPrompt(w, back-timedelta(minutes=42), back, before); card.show(); q.processEvents(); card.grab().save(str(out/f"{name}.png")); card.close()
     print("saved", out, "dpr", w.devicePixelRatioF())
     w.shutdown(); q.quit()

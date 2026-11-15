@@ -373,16 +373,25 @@ class Store:
                     (day, json.dumps({"target":target,"rows":source,"minutes":minutes}), datetime.now().isoformat(timespec="seconds")))
         return len(source)
 
-    def move_minutes(self, first: datetime, last: datetime, source: tuple, target: tuple) -> float:
+    def move_minutes(self, first: datetime, last: datetime, source: tuple, target: tuple, moves: list | None = None) -> float:
         """Move minute records of (category, app, host) `source` within [first, last) to `target`,
-        keeping the daily totals in step. Returns the seconds moved; moving back undoes it."""
+        keeping the daily totals in step. Returns the seconds moved; moving back undoes it.
+        When `moves` is given, each (minute, seconds) moved is appended to it, for unmove()."""
         lo = first.replace(second=0, microsecond=0).isoformat(timespec="minutes"); hi = last.isoformat(timespec="minutes")
+        rows = self.db.execute("""SELECT minute,seconds FROM minute_usage WHERE minute>=? AND minute<=?
+            AND category=? AND app=? AND host=?""", (lo, hi, *source)).fetchall()
+        if moves is not None: moves.extend(rows)
+        return self.unmove(rows, source, target)
+
+    def unmove(self, moves, source: tuple, target: tuple) -> float:
+        """Move exactly these (minute, seconds) amounts from `source` to `target`. Undoes move_minutes
+        when the target already held time of its own in those minutes (the program in use just
+        before going away): only what was moved goes back."""
         moved = 0.0
         with self.db:
-            rows = self.db.execute("""SELECT minute,seconds FROM minute_usage WHERE minute>=? AND minute<=?
-                AND category=? AND app=? AND host=?""", (lo, hi, *source)).fetchall()
-            for minute, seconds in rows:
-                self.db.execute("DELETE FROM minute_usage WHERE minute=? AND category=? AND app=? AND host=?", (minute, *source))
+            for minute, seconds in moves:
+                self.db.execute("UPDATE minute_usage SET seconds=seconds-? WHERE minute=? AND category=? AND app=? AND host=?", (seconds, minute, *source))
+                self.db.execute("DELETE FROM minute_usage WHERE minute=? AND category=? AND app=? AND host=? AND seconds<0.000001", (minute, *source))
                 self.db.execute("""INSERT INTO minute_usage VALUES (?,?,?,?,?) ON CONFLICT(minute,category,app,host)
                     DO UPDATE SET seconds=seconds+excluded.seconds""", (minute, *target, seconds))
                 day = minute[:10]
