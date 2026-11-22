@@ -18,13 +18,16 @@ from core import CATEGORIES, EXPORT_PARTS, LABELS, OWN_WINDOW_MODES, RULE_TARGET
 from theme import ACCENT, COLORS, MUTED, INK, P, TEXTS, THEME, THEMES, TINTS, icon, font
 import windows
 import theme
-from charts import Donut, Heatmap, StackedBars, RankList, SubBars, Timeline, hide_tooltip
+from charts import AppTotals, Donut, Heatmap, StackedBars, RankList, SubBars, Timeline, hide_tooltip
 
-PAGES = [("今日总览", "overview", "今天的专注", "实时记录今天的投入、分心与离开。"),
+PAGES = [("今日总览", "overview", "今天的时光", "实时记录今天的投入、分心与离开。"),
          ("时间分析", "chart", "时间分析", "选一段时间看投入、分心和节奏；点日历或柱子分析某一天。"),
          ("活动管理", "list", "活动管理", "筛选记录、批量改分类，让统计符合实际。"),
          ("规则与设置", "settings", "规则与设置", "决定以后怎样记录，以及多久提醒一次。"),
-         ("浏览器连接", "browser", "浏览器连接", "连接扩展后按网站域名识别，提醒更准确。")]
+         ("浏览器连接", "browser", "浏览器连接", "连接扩展后按网站域名识别，提醒更准确。"),
+         ("应用与网站", "apps", "应用与网站", "每个程序和网站一共用了多久，可按时间和分类查看。")]
+# Sidebar order by page index: 应用与网站 was added last (saved page numbers stay valid) but sits under 时间分析.
+NAV_ORDER = [0, 1, 5, 2, 3, 4]
 
 
 def theme_swatch(key):
@@ -387,7 +390,7 @@ def legend():
 
 class Shell(QMainWindow):
     def build(self):
-        self.setWindowTitle("专注时间助手")
+        self.setWindowTitle("拾光")
         self.resize(self.default_size()); self.setMinimumSize(980, 660)
         canvas = QWidget(); canvas.setObjectName("canvas"); self.setCentralWidget(canvas)
         columns = QHBoxLayout(canvas); columns.setContentsMargins(0, 0, 0, 0); columns.setSpacing(0)
@@ -402,7 +405,7 @@ class Shell(QMainWindow):
         self.pause_button = button("暂停记录", self.pause_clicked, kind="pause"); self.pause_button.setToolTip("暂停计时与提醒，可选暂停多久（Ctrl+P 直接暂停）")
         header.addWidget(self.pause_button); region.addLayout(header)
         self.pages = QStackedWidget(); region.addWidget(self.pages, 1)
-        self.build_overview(); self.build_analysis(); self.build_manager(); self.build_settings(); self.build_browser()
+        self.build_overview(); self.build_analysis(); self.build_manager(); self.build_settings(); self.build_browser(); self.build_apps()
         columns.addWidget(right, 1)
         self.toast = Toast(canvas)
         self.navigate(0)
@@ -430,14 +433,17 @@ class Shell(QMainWindow):
     def build_sidebar(self):
         sidebar = QFrame(); sidebar.setObjectName("sidebar"); sidebar.setFixedWidth(196)
         nav = QVBoxLayout(sidebar); nav.setContentsMargins(14, 24, 14, 18); nav.setSpacing(4)
-        brand = QHBoxLayout(); brand.setContentsMargins(8, 0, 0, 0); brand.setSpacing(10)
+        # The clock's left edge lines up with the nav icons' (button 14 + padding 14 + glyph inset 18*3/24),
+        # and the name sits on the page title's baseline.
+        brand = QHBoxLayout(); brand.setContentsMargins(13, 0, 0, 0); brand.setSpacing(10)
         brand.addWidget(IconLabel(icon("logo", ACCENT, 28), 28))
-        name = text("专注时间"); name.setStyleSheet("font-size:18px;font-weight:700;"); brand.addWidget(name); brand.addStretch()
+        name = text("拾光"); name.setStyleSheet("font-size:22px;font-weight:700;"); brand.addWidget(name); brand.addStretch()
         nav.addLayout(brand); nav.addSpacing(26)
         self.nav_buttons = []; self.nav_group = QButtonGroup(self)
-        for index, (title, kind, _, _) in enumerate(PAGES):
+        for position, index in enumerate(NAV_ORDER):
+            title, kind, _, _ = PAGES[index]
             b = QPushButton(title); b.setCursor(Qt.CursorShape.PointingHandCursor); b.setCheckable(True); b.setProperty("role", "nav")
-            b.setToolTip(f"Ctrl+{index+1}")
+            b.setToolTip(f"Ctrl+{position+1}"); b.setProperty("page", index)
             b.setIcon(icon(kind, P["nav"], 18)); b.setIconSize(QSize(18, 18)); b.clicked.connect(lambda checked=False, i=index: self.navigate(i))
             self.nav_group.addButton(b, index); self.nav_buttons.append(b); nav.addWidget(b)
         nav.addStretch()
@@ -459,16 +465,28 @@ class Shell(QMainWindow):
         self.sidebar_status = text("●  正在记录"); self.sidebar_status.setContentsMargins(8, 0, 0, 0); nav.addWidget(self.sidebar_status)
         return sidebar
 
+    SEARCHES = {2: "search", 3: "rule_search", 5: "apps_search"}  # page → its search box
+
     def navigate(self, index):
         _, _, title, subtitle = PAGES[index]
         changed = index != self.pages.currentIndex()
+        if changed: self.leave_search(self.pages.currentIndex())
         self.pages.setCurrentIndex(index)
         if changed and self.isVisible(): fade_in(self.pages.currentWidget())
-        for i, b in enumerate(self.nav_buttons):
-            b.setChecked(i == index); b.setIcon(icon(PAGES[i][1], ACCENT if i == index else P["nav"], 18))
+        for b in self.nav_buttons:
+            i = b.property("page"); b.setChecked(i == index); b.setIcon(icon(PAGES[i][1], ACCENT if i == index else P["nav"], 18))
         self.page_title.setText(title); self.page_subtitle.setText(subtitle)
         if hasattr(self, "store"):
             self.refresh(force=True)
+
+    def leave_search(self, page):
+        """Leaving a page empties its search box, so coming back shows everything again. Quietly: the
+        page filters by the box whenever it is shown, and refreshing a page nobody sees is wasted work."""
+        field = getattr(self, self.SEARCHES.get(page, ""), None)
+        if field is None or not field.text(): return
+        field.blockSignals(True); field.clear(); field.blockSignals(False)
+        if page == 2: self.manager_signature = None  # the activity table is rebuilt on return
+        if page == 5: self.apps_page = 0
 
     def build_overview(self):
         view, layout = page()
@@ -668,7 +686,10 @@ class Shell(QMainWindow):
         inside.addWidget(text("柱高是已记录的时长，不是开机时长；空白表示当天没有记录。点击柱子分析那一天。", "small")); layout.addWidget(self.trend_card)
 
         pair = QHBoxLayout(); pair.setSpacing(12)
-        panel, inside = card("应用与网站排行", kind="rank")
+        panel, inside = card()
+        head = heading("应用与网站排行", "rank"); head.addStretch()
+        self.rank_all = button("全部应用与网站", lambda: self.navigate(5), role="link"); self.rank_all.setToolTip("每个程序和网站的总时长，可按分类查看")
+        head.addWidget(self.rank_all); inside.addLayout(head)
         self.range_rank = RankList(8); self.range_rank.setMinimumHeight(RankList.ROW*5)
         self.range_rank.chosen.connect(lambda query: self.open_manager(day=self.analysis_last, query=query)); inside.addWidget(self.range_rank, 1)
         pair.addWidget(panel, 1)
@@ -980,6 +1001,41 @@ class Shell(QMainWindow):
         if changed and self.isVisible(): fade_in(self.settings_stack.currentWidget())
         if index == 1 and hasattr(self, "store"): self.refresh_rules()
         if index == 2 and hasattr(self, "store"): self.refresh_subs()
+
+    def build_apps(self):
+        """应用与网站: every program and website with its total time, over everything recorded or the
+        last days, for all categories or one, with a search."""
+        view, layout = page(); self.apps_view = view
+        controls = QHBoxLayout(); controls.setSpacing(12)
+        self.apps_scope = Segmented([("全部记录", "all"), ("近 30 天", "30"), ("近 7 天", "7"), ("今天", "1")])
+        self.apps_scope.setToolTip("全部记录：从第一天有记录起累计")
+        self.apps_scope.currentIndexChanged.connect(lambda _: self.choose_apps_scope()); controls.addWidget(self.apps_scope)
+        self.apps_note = text("", "muted"); self.apps_note.setMinimumWidth(1)  # gives way first in a narrow window
+        controls.addSpacing(4); controls.addWidget(self.apps_note, 1); layout.addLayout(controls)
+        panel, inside = card(margins=(20, 16, 20, 16), spacing=14); self.apps_card = panel
+        head = QHBoxLayout(); head.setSpacing(12)
+        self.apps_kind = Segmented([("全部", ""), *((LABELS[k], k) for k in ("work", "distraction", "system", "unknown"))])
+        self.apps_kind.setToolTip("只看某一类的应用和网站")
+        self.apps_kind.currentIndexChanged.connect(lambda _: self.apps_filter_changed()); head.addWidget(self.apps_kind); head.addStretch()
+        self.apps_search = QLineEdit(); self.apps_search.setPlaceholderText("搜索应用或网站"); self.apps_search.setClearButtonEnabled(True)
+        self.apps_search.setMinimumWidth(140); self.apps_search.setMaximumWidth(260)
+        self.apps_search.textChanged.connect(lambda _: self.apps_filter_changed()); head.addWidget(self.apps_search, 1)
+        inside.addLayout(head)
+        self.app_totals = AppTotals(); self.app_totals.chosen.connect(self.app_total_chosen); inside.addWidget(self.app_totals)
+        # 每页 20 / 50 / 100 | ‹ 第 1 / 7 页 ›
+        self.apps_pager = QWidget(); pager = QHBoxLayout(self.apps_pager); pager.setContentsMargins(0, 4, 0, 0); pager.setSpacing(8)
+        pager.addWidget(text("每页", "muted"))
+        self.apps_size = Segmented([("20", 20), ("50", 50), ("100", 100)]); self.apps_size.setToolTip("一页显示多少个应用和网站")
+        self.apps_size.currentIndexChanged.connect(lambda _: self.choose_apps_page_size()); pager.addWidget(self.apps_size); pager.addStretch()
+        self.apps_prev = QPushButton(); self.apps_next = QPushButton()
+        for b, kind, tip, step in ((self.apps_prev, "left", "上一页", -1), (self.apps_next, "right", "下一页", 1)):
+            b.setProperty("role", "icon"); b.setCursor(Qt.CursorShape.PointingHandCursor); b.setToolTip(tip)
+            b.setIcon(icon(kind, MUTED, 14)); b.setIconSize(QSize(14, 14)); b.clicked.connect(lambda checked=False, s=step: self.turn_apps_page(s))
+        self.apps_page_label = text("", "muted"); self.apps_page_label.setAlignment(Qt.AlignmentFlag.AlignCenter); self.apps_page_label.setMinimumWidth(92)
+        pager.addWidget(self.apps_prev); pager.addWidget(self.apps_page_label); pager.addWidget(self.apps_next)
+        inside.addWidget(self.apps_pager)
+        layout.addWidget(panel); layout.addStretch()
+        self.pages.addWidget(view)
 
     def build_browser(self):
         view, layout = page()

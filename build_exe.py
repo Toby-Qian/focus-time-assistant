@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parent
 NAME = "专注时间助手"
 WORK = ROOT/"90_过程文件"/"2026-11-10_打包"
 OUTPUT = ROOT/"程序"
-VERSION = (1, 2, 1, 0)
+VERSION = (1, 3, 0, 0)
 
 
 def make_icon(path):
@@ -26,14 +26,14 @@ def make_icon(path):
     from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QRectF, Qt
     from PySide6.QtGui import QColor, QGuiApplication, QImage, QPainter, QPen
     app = QGuiApplication.instance() or QGuiApplication([])
-    from theme import ACCENT
+    from theme import ACCENT, draw_logo
     images = []
     for size in (16, 20, 24, 32, 40, 48, 64, 128, 256):
         image = QImage(size, size, QImage.Format.Format_ARGB32); image.fill(Qt.GlobalColor.transparent)
         p = QPainter(image); p.setRenderHint(QPainter.RenderHint.Antialiasing); p.scale(size/24, size/24)
         p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(ACCENT)); p.drawRoundedRect(QRectF(1, 1, 22, 22), 6, 6)
-        p.setPen(QPen(QColor("white"), 2.0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-        p.setBrush(Qt.BrushStyle.NoBrush); p.drawEllipse(QRectF(5.5, 5.5, 13, 13)); p.drawLine(12, 8.5, 12, 12); p.drawLine(12, 12, 14.8, 13.6)
+        inner = .66  # the 24-unit logo shrunk into the badge, stroke kept at about 2 units
+        p.translate(12, 12); p.scale(inner, inner); p.translate(-12, -12); draw_logo(p, "white", 2.0/inner)
         p.end()
         data = QByteArray(); buffer = QBuffer(data); buffer.open(QIODevice.OpenModeFlag.WriteOnly); image.save(buffer, "PNG")
         images.append((size, bytes(data)))

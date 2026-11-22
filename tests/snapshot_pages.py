@@ -103,6 +103,13 @@ def shoot():
     w.grab().save(str(out/"2b_analysis_lower.png"))
     w.range_combo.setCurrentIndex(3); settle(); bar = area.verticalScrollBar(); bar.setValue(w.sub_analysis.parentWidget().y()-200); settle(.2)
     w.grab().save(str(out/"2h_analysis_subs.png")); w.sub_kind.setCurrentIndex(1); settle(.2); w.grab().save(str(out/"2i_analysis_subs_play.png")); w.sub_kind.setCurrentIndex(0)
+    bar.setValue(w.range_rank.parentWidget().y()-200); settle(.2); w.grab().save(str(out/"2k_analysis_ranking.png"))
+    # 应用与网站 page: everything so far, one category, a search, the last 7 days.
+    w.navigate(5); settle(); w.apps_scope.setCurrentIndex(w.apps_scope.findData("all")); settle(.2); w.grab().save(str(out/"7_apps_all.png"))
+    w.apps_kind.setCurrentIndex(w.apps_kind.findData("distraction")); settle(.2); w.grab().save(str(out/"7b_apps_distraction.png"))
+    w.apps_kind.setCurrentIndex(0); w.apps_search.setText("o"); settle(.2); w.grab().save(str(out/"7c_apps_search.png")); w.apps_search.clear()
+    w.apps_scope.setCurrentIndex(w.apps_scope.findData("7")); settle(.2); w.grab().save(str(out/"7d_apps_7_days.png"))
+    w.apps_scope.setCurrentIndex(w.apps_scope.findData("all")); w.navigate(1); settle()
     bar = area.verticalScrollBar(); bar.setValue(bar.maximum()//2); settle(.2); w.grab().save(str(out/"2c_analysis_middle.png"))
     w.choose_custom("lastweek"); settle(); bar.setValue(0); settle(.2); w.grab().save(str(out/"2f_last_week.png"))
     assert w.more_range.isChecked() and w.more_range.text() == "上周" and w.analysis_span()[0] == 7

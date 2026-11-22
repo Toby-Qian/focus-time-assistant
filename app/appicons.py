@@ -7,6 +7,8 @@ nothing is fetched from the network.
 from __future__ import annotations
 
 import json
+import os
+import zlib
 from pathlib import Path
 
 from PySide6.QtCore import QFileInfo, QRectF, Qt
@@ -21,12 +23,13 @@ _provider = None
 _store: Path | None = None
 _seen_version = -1
 site_dir: Path | None = None   # data/site_icons, filled by the browser extension
+icon_dir: Path | None = None   # data/icon_cache: program icons as PNG, so a restart needs no shell calls
 
 
 def load(path: Path, sites: Path | None = None):
     """Read remembered program paths (missing or damaged file: start empty)."""
-    global _store, site_dir
-    _store = path; site_dir = sites
+    global _store, site_dir, icon_dir
+    _store = path; site_dir = sites; icon_dir = path.parent/"icon_cache"
     try:
         saved = json.loads(path.read_text(encoding="utf-8"))
         if isinstance(saved, dict):
@@ -49,8 +52,42 @@ def save():
 
 
 def clear():
-    """Forget cached icons, e.g. after a new site icon arrived."""
+    """Forget cached icons."""
     _cache.clear()
+
+
+def clear_sites():
+    """A new site icon arrived: forget website entries only; program icons stay (each costs shell calls)."""
+    for key in [k for k in _cache if not k[0].endswith(".exe")]: _cache.pop(key, None)
+
+
+def _forget_learned():
+    """Paths were learned: only those programs can now show a real icon instead of a lettered tile."""
+    names = set(windows.learned); windows.learned.clear()
+    for key in [k for k in _cache if k[0] in names]: _cache.pop(key, None)
+
+
+def _disk_name(path: str):
+    """File stem in icon_dir for a program file, changing when the file changes (an update may change its icon)."""
+    try: info = os.stat(path)
+    except OSError: return None
+    return f"{Path(path).stem[:40]}-{zlib.crc32(f'{path}|{info.st_mtime_ns}|{info.st_size}'.encode()):08x}"
+
+
+def _from_disk(stem):
+    result = QIcon()
+    for size in (32, 48):
+        pixmap = QPixmap(str(icon_dir/f"{stem}-{size}.png"))
+        if not pixmap.isNull(): result.addPixmap(pixmap)
+    return None if result.isNull() else result
+
+
+def _to_disk(stem, pixmaps):
+    try:
+        icon_dir.mkdir(exist_ok=True)
+        for size, pixmap in pixmaps: pixmap.save(str(icon_dir/f"{stem}-{size}.png"), "PNG")
+    except OSError:
+        pass
 
 
 def _site_icon(host):
@@ -104,8 +141,8 @@ def ready(key: str, category: str = "unknown") -> bool:
 def icon_for(key: str, category: str = "unknown") -> QIcon:
     """`key` is a program (".exe"), a system surface ("界面:…") or a website domain."""
     global _provider, _seen_version
-    if _seen_version != windows.paths_version:  # a program path was learned: tiles may now become real icons
-        _cache.clear(); _seen_version = windows.paths_version
+    if _seen_version != windows.paths_version:  # a program path was learned: its tile may now become a real icon
+        _forget_learned(); _seen_version = windows.paths_version
     cached = _cache.get((key, category))
     if cached is not None:
         return cached
@@ -116,16 +153,19 @@ def icon_for(key: str, category: str = "unknown") -> QIcon:
         return result
     result = None
     path = windows.find_path(key) if key.endswith(".exe") else None
-    if path and Path(path).exists():
+    stem = _disk_name(path) if path and icon_dir is not None else None
+    if stem: result = _from_disk(stem)  # ~0.2 ms instead of two shell calls
+    if result is None and path and Path(path).exists():
         _provider = _provider or QFileIconProvider()
         found = _provider.icon(QFileInfo(path))
         if not found.isNull():
             # A shell icon asks Windows for a fresh bitmap on every paint (2–3 ms each); keep fixed sizes instead.
-            result = QIcon()
+            result = QIcon(); kept = []
             for size in (32, 48):  # each size costs one shell call (~14 ms); smaller sizes are scaled from these
                 pixmap = found.pixmap(size, size)
-                if not pixmap.isNull(): result.addPixmap(pixmap)
+                if not pixmap.isNull(): result.addPixmap(pixmap); kept.append((size, pixmap))
             if result.isNull(): result = found
+            elif stem: _to_disk(stem, kept)
     if result is None and not key.endswith(".exe") and "." in key and not key.startswith("界面:"):
         result = _site_icon(key)
     if result is None:

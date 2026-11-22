@@ -56,6 +56,8 @@ DEFAULTS = {
     "app_names": {},  # {"x.exe": "display name"} — the user's own names for programs
     "site_names": {},  # {"domain": "display name"} — the user's own names for websites (subdomains included)
     "overview_away": True,  # overview shares, ring and hourly bars include away time
+    "apps_range": "all",  # 应用与网站 page: "all" every record so far, else the last "30" / "7" / "1" days
+    "apps_page_size": 20,  # 应用与网站 page: rows per page (20 / 50 / 100)
     # 小类 of 工作 / 摸鱼 (see subcats.py): the list, the user's program / website choices, daily limits by id.
     "subcategories": subcats.default_list(), "sub_rules": {}, "sub_limits": {},
     "work_goal_minutes": 360, "distraction_limit_minutes": 30, "focus_minutes": 25, "rest_after_minutes": 0,
@@ -112,7 +114,7 @@ def validate_config(config: dict):
         raise ValueError("remember_rule 应为 true / false")
     if not isinstance(config["window"], str) or len(config["window"]) > 4096:
         config["window"] = ""
-    if not isinstance(config["page"], int) or not 0 <= config["page"] <= 4:
+    if not isinstance(config["page"], int) or not 0 <= config["page"] <= 5:
         config["page"] = 0
     if config.get("rhythm_view") not in (0, 1) or isinstance(config.get("rhythm_view"), bool):
         config["rhythm_view"] = 0
@@ -143,6 +145,10 @@ def validate_config(config: dict):
     subcats.validate(config)
     if not isinstance(config.get("overview_away"), bool):
         config["overview_away"] = True
+    if config.get("apps_range") not in ("all", "30", "7", "1"):
+        config["apps_range"] = "all"
+    if config.get("apps_page_size") not in (20, 50, 100):
+        config["apps_page_size"] = 20
     if config.get("daily_summary") not in ("off", "18:00", "20:00", "21:00", "22:00", "23:00"):
         config["daily_summary"] = "off"
     if not isinstance(config.get("focus_float"), bool):
@@ -285,6 +291,23 @@ class Store:
             if seconds > entry["best"]: entry["category"], entry["best"] = category, seconds
         return sorted(((app, host, e["category"], e["seconds"], e["days"]) for (app, host), e in grouped.items()),
                       key=lambda row: row[3], reverse=True)
+
+    def app_totals(self, first: str, last: str, category: str = ""):
+        """Per (app, host) over days first..last, away excluded (only `category` when given):
+        [(app, host, seconds, {days used}, {category: seconds})], most time first. The days are a set
+        so that rows shown under one name (a site's subdomains) count a day once."""
+        only = " AND category=?" if category else ""; args = (first, last, *((category,) if category else ()))
+        grouped = {}
+        for app, host, day, cat, seconds in self.db.execute(f"""SELECT app,host,day,category,seconds FROM usage
+                WHERE day>=? AND day<=? AND category!='idle'{only}""", args):
+            entry = grouped.setdefault((app, host), [0.0, set(), {}])
+            entry[0] += seconds; entry[1].add(day); entry[2][cat] = entry[2].get(cat, 0.0)+seconds
+        return sorted(((app, host, seconds, days, split) for (app, host), (seconds, days, split) in grouped.items() if seconds >= 1),
+                      key=lambda row: row[2], reverse=True)
+
+    def record_span(self):
+        """(first day with a record or None, number of days with records)."""
+        return tuple(self.db.execute("SELECT MIN(day),COUNT(DISTINCT day) FROM usage").fetchone())
 
     def hour_profile(self, first: str, last: str):
         """Average seconds per hour of day and category, over the days first..last that have minute records."""

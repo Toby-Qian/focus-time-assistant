@@ -36,7 +36,7 @@ def check():
         assert awareness==2,"Qt 未启用每显示器 DPI 适配"
         for widget in w.card_values.values():
             assert widget.width()>=widget.fontMetrics().horizontalAdvance(widget.text()),"数字裁切"
-        for i in range(5): w.navigate(i); q.processEvents(); assert w.pages.currentIndex()==i
+        for i in range(6): w.navigate(i); q.processEvents(); assert w.pages.currentIndex()==i
         # Isolated fixtures only; no invented history is ever written to the real database.
         now=datetime.now(); day=now.date().isoformat()
         w.store.add(now,now+timedelta(seconds=35),Activity("unknown","qt-check.exe"))
@@ -202,6 +202,45 @@ def check():
         w.choose_theme("indigo"); assert not w.theme_restart.isVisibleTo(w)
         # Analysis page: range ranking and hour profile come from the same records.
         w.navigate(1); assert w.range_rank.entries and w.range_rank.entries[0][3]>0,"范围排行为空"
+        # 应用与网站 page: third in the sidebar (Ctrl+3), from the ranking's link; range, category, search, click → manager.
+        assert [b.text() for b in w.nav_buttons][2]=="应用与网站" and w.nav_buttons[2].toolTip()=="Ctrl+3","侧栏位置不对"
+        w.rank_all.click(); assert w.pages.currentIndex()==5 and w.nav_buttons[2].isChecked(),"排行的链接没有打开应用与网站"
+        w.apps_scope.setCurrentIndex(w.apps_scope.findData("all")); everything=sum(r[3] for r in w.app_totals.rows)
+        assert everything>0 and w.config["apps_range"]=="all" and "天有记录" in w.apps_note.text(),"全部记录范围不对"
+        w.apps_kind.setCurrentIndex(w.apps_kind.findData("work")); assert w.app_totals.rows and all(r[4]=="work" for r in w.app_totals.rows),"按分类筛选不对"
+        w.apps_kind.setCurrentIndex(0); w.apps_scope.setCurrentIndex(w.apps_scope.findData("1"))
+        assert sum(r[3] for r in w.app_totals.rows)<=everything+1 and w.app_totals.heads[0]=="时长" and w.config["apps_range"]=="1","今天范围不对"
+        many=[A("work",f"many{i}.exe") for i in range(12)]
+        for i,a in enumerate(many): w.store.add(now-timedelta(minutes=30+i),now-timedelta(minutes=29+i),a)
+        w.store.flush(); w.refresh_app_totals(); assert len(w.app_totals.rows)>=12,"没有列出全部应用"
+        # Pages of 20 / 50 / 100: next page shows the following rows; another category starts on page 1 again.
+        for i in range(25): w.store.add(now-timedelta(minutes=80+i),now-timedelta(minutes=79+i),A("work",f"paged{i}.exe"))
+        w.store.flush(); w.apps_size.setCurrentIndex(w.apps_size.findData(20)); w.refresh_app_totals()
+        first=[r[0] for r in w.app_totals.rows]; assert len(first)==20 and w.apps_pager.isVisibleTo(w) and not w.apps_prev.isEnabled(),"分页不对"
+        w.apps_next.click(); second=[r[0] for r in w.app_totals.rows]; assert second and not set(first)&set(second) and w.apps_page==1 and "第 2 /" in w.apps_page_label.text(),"下一页不对"
+        w.apps_kind.setCurrentIndex(w.apps_kind.findData("work")); assert w.apps_page==0,"换分类没有回到第一页"; w.apps_kind.setCurrentIndex(0)
+        w.apps_size.setCurrentIndex(w.apps_size.findData(100)); assert len(w.app_totals.rows)>20 and not w.apps_next.isEnabled() and w.config["apps_page_size"]==100,"每页 100 不对"
+        w.apps_size.setCurrentIndex(w.apps_size.findData(20))
+        w.focus_search(); assert w.pages.currentIndex()==5,"Ctrl+F 离开了应用与网站页"
+        w.apps_search.setText("MANY1"); assert {r[0] for r in w.app_totals.rows}=={"many1.exe","many10.exe","many11.exe"} and "找到 3 个" in w.apps_note.text(),"搜索不对"
+        w.apps_search.setText("没有这个"); assert not w.app_totals.rows and "没有找到" in w.app_totals.empty; w.apps_search.clear()
+        # A site's subdomains are one row under its name; the day counts once; clicking searches by the name.
+        w.store.add(now-timedelta(minutes=200),now-timedelta(minutes=190),A("distraction","chrome.exe","www.douyin.com"))
+        w.store.add(now-timedelta(minutes=180),now-timedelta(minutes=175),A("distraction","chrome.exe","live.douyin.com"))
+        w.store.flush(); w.apps_scope.setCurrentIndex(w.apps_scope.findData("1")); w.apps_search.setText("抖音")
+        douyin=[r for r in w.app_totals.rows if r[1]=="抖音"]; assert len(douyin)==1 and douyin[0][3]>=899,"子域名没有合并"
+        w.apps_scope.setCurrentIndex(w.apps_scope.findData("7")); w.apps_search.setText("抖音")
+        assert [r[5][2][0] for r in w.app_totals.rows if r[1]=="抖音"]==["1 天"],"合并后同一天算了两次"
+        w.app_total_chosen(douyin[0][0]); assert w.search.text()=="抖音","合并的网站点进去没按名字搜索"; w.navigate(5)
+        w.apps_scope.setCurrentIndex(w.apps_scope.findData("all")); w.apps_search.clear()
+        key=w.app_totals.rows[0][0]; wanted=w.apps_last[key][1]; w.app_total_chosen(key); assert w.pages.currentIndex()==2 and w.search.text()==wanted and w.table.rowCount()>0,"点应用没有打开活动管理"
+        # Leaving a page empties its search box; the list is whole again on return.
+        w.search.setText("no-such-record"); assert w.table.rowCount()==0; w.navigate(0); assert w.search.text()=="","离开活动管理没有清空搜索"
+        w.navigate(2); assert w.table.rowCount()>0,"回到活动管理列表没恢复"
+        w.navigate(5); w.apps_search.setText("没有这个"); w.navigate(1); assert w.apps_search.text()==""; w.navigate(5); assert w.app_totals.rows,"回到应用与网站列表没恢复"
+        w.navigate(3); w.switch_settings(1); w.rule_search.setText("没有这个"); w.navigate(0); w.navigate(3); assert w.rule_search.text()=="" and any(not w.rules_table.isRowHidden(r) for r in range(w.rules_table.rowCount())),"规则搜索没有清空"
+        w.switch_settings(0)
+        w.navigate(5); w.apps_scope.setCurrentIndex(w.apps_scope.findData("all")); w.navigate(1)
         # A day picked in the calendar never makes the page wider than the window, nor scrolls it.
         from PySide6.QtCore import QEvent,QPoint
         from PySide6.QtWidgets import QToolTip
@@ -210,6 +249,10 @@ def check():
             w.show_analysis_day((now.date()-timedelta(days=back)).isoformat(),keep_scroll=True); q.processEvents()
             assert w.analysis_view.horizontalScrollBar().maximum()==0,"选中某天后页面比窗口宽"
             assert bar.value()==min(40,bar.maximum()),"点日历后页面滚动了"
+        size=w.size(); w.resize(w.minimumWidth(),w.height()); q.processEvents(); w.refresh_analysis(); q.processEvents()
+        assert w.analysis_view.horizontalScrollBar().maximum()==0,"最窄窗口下时间分析比窗口宽"
+        w.navigate(5); q.processEvents(); assert w.apps_view.horizontalScrollBar().maximum()==0,"最窄窗口下应用与网站比窗口宽"
+        w.navigate(1); w.resize(size); q.processEvents()
         # A chart's tooltip goes away as soon as the pointer leaves it.
         QToolTip.showText(w.heatmap.mapToGlobal(QPoint(20,20)),"check",w.heatmap); q.processEvents()
         if QToolTip.isVisible():
@@ -271,7 +314,7 @@ def check():
         # Report export writes the chosen parts (dialog skipped: call the exporter directly).
         import report
         out=folder/"report_check"; written=report.export(w.store,out,day,day,["daily","apps"],"both","#4B5FE0")
-        assert (out/"专注时间报告.html").exists() and (out/"每日汇总.csv").exists() and len(written)==3,"报告导出失败"
+        assert (out/"拾光报告.html").exists() and (out/"每日汇总.csv").exists() and len(written)==3,"报告导出失败"
         # Hidden in the tray: sampling continues but no widget work happens.
         w.navigate(0); w.hide(); q.processEvents(); w.now_label.setText("sentinel"); w.refresh()
         assert w.now_label.text()=="sentinel","隐藏时仍在刷新界面"
@@ -295,7 +338,7 @@ def check():
         w.toggle_pause(); assert w.paused
         w.toggle_pause(); assert not w.paused
         evidence.update(status="PASS",dpi_awareness=awareness,device_pixel_ratio=w.devicePixelRatioF(),logical_dpi=q.primaryScreen().logicalDotsPerInch(),pages=5,
-            checks=["card text fits","navigation","search and empty state","selection survives refresh","batch classification conserves time","undo preserves totals","rules persist","focus ring only after Tab","rule category filter and quick change","ignore removes time and undo restores","own window recorded as away","own window category adjustable","skip own window","theme choice saved","range ranking","report export","desktop / background focus not counted","system surfaces adjustable","charts drawn with animations off","focus session recorded","focus task, floating timer and break","timed pause resumes","analysis calendar and findings","daily summary, backup, tray colour, program icons","return prompt and away-as-work undo","per-program daily limit","goals announced once","rest reminder","start with Windows toggle","settings saved",
+            checks=["card text fits","navigation","search and empty state","selection survives refresh","batch classification conserves time","undo preserves totals","rules persist","focus ring only after Tab","rule category filter and quick change","ignore removes time and undo restores","own window recorded as away","own window category adjustable","skip own window","theme choice saved","app and website totals","report export","desktop / background focus not counted","system surfaces adjustable","charts drawn with animations off","focus session recorded","focus task, floating timer and break","timed pause resumes","analysis calendar and findings","daily summary, backup, tray colour, program icons","return prompt and away-as-work undo","per-program daily limit","goals announced once","rest reminder","start with Windows toggle","settings saved",
                     "table cells update in place","no widget refresh while hidden","second launch wakes instance","notification retains focus","keep scrolling snoozes reminders only","pause/resume"])
         (folder/"qt_desktop_check.json").write_text(json.dumps(evidence,ensure_ascii=False,indent=2),encoding="utf-8")
         print(json.dumps(evidence,ensure_ascii=True))

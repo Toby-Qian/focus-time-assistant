@@ -85,12 +85,12 @@ def main():
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("FocusTimeAssistant.Desktop")
         except (AttributeError, OSError):
             pass
-    application = QApplication(sys.argv[:1]); application.setApplicationName("专注时间助手"); application.setQuitOnLastWindowClosed(False)
+    application = QApplication(sys.argv[:1]); application.setApplicationName("拾光"); application.setQuitOnLastWindowClosed(False)
     theme.use(saved_theme(args.data_dir/"settings.json"))
     theme.setup(application, args.data_dir/"theme_cache")
     from desktop import App  # after theme.use(): the interface modules read the palette when imported
     if not mutex or exists:
-        QMessageBox.information(None, "专注时间助手", "程序已在运行，请从任务栏或系统托盘打开。" if exists else "无法建立实例锁，请重试。")
+        QMessageBox.information(None, "拾光", "程序已在运行，请从任务栏或系统托盘打开。" if exists else "无法建立实例锁，请重试。")
         if mutex: kernel.CloseHandle(mutex)
         return
     window = None

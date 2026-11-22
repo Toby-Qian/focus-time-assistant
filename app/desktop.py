@@ -33,7 +33,7 @@ from bridge import BrowserState, start_bridge
 from theme import ACCENT, COLORS, INK, P, TEXTS, THEMES, TINTS, MUTED, SUBTLE, app_name, icon, key_name, label, site_name
 from charts import focus_ratio, short_time, share
 import subcats
-from ui_qt import Shell, CategoryDelegate, ElidedLabel, IconLabel, Segmented, text, button, restyle, set_text, fade_in
+from ui_qt import NAV_ORDER, Shell, CategoryDelegate, ElidedLabel, IconLabel, Segmented, text, button, restyle, set_text, fade_in
 import theme
 import windows
 import appicons
@@ -445,7 +445,7 @@ class WelcomeDialog(QDialog):
 
     def __init__(self, parent, goal, autostart):
         super().__init__(parent)
-        self.setWindowTitle("欢迎使用专注时间助手"); self.setMinimumWidth(520)
+        self.setWindowTitle("欢迎使用拾光"); self.setMinimumWidth(520)
         layout = QVBoxLayout(self); layout.setContentsMargins(28, 26, 28, 22); layout.setSpacing(16)
         title = text("看清时间都花在了哪"); title.setStyleSheet("font-size:20px;font-weight:700;"); layout.addWidget(title)
         for kind, head, detail in self.POINTS:
@@ -503,6 +503,9 @@ class App(Shell):
         startup = Path(os.environ.get("APPDATA", str(Path.home())))/"Microsoft"/"Windows"/"Start Menu"/"Programs"/"Startup"
         self.startup_link = (data_dir/"startup_test" if testing else startup)/"专注时间助手.lnk"
         self.build_tray(); self.build()
+        self.apps_page = 0  # 应用与网站: which page of the list
+        for widget, value in ((self.apps_scope, self.config["apps_range"]), (self.apps_size, self.config["apps_page_size"])):
+            widget.blockSignals(True); widget.setCurrentIndex(widget.findData(value)); widget.blockSignals(False)
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.row_menu)
         self.table.setIconSize(QSize(18, 18)); self.rules_table.setIconSize(QSize(18, 18))
@@ -511,8 +514,8 @@ class App(Shell):
         QShortcut(QKeySequence("Ctrl+Z"), self).activated.connect(self.undo_shortcut)
         QShortcut(QKeySequence("F5"), self).activated.connect(lambda: self.refresh(force=True))
         QShortcut(QKeySequence("Ctrl+Shift+F"), self).activated.connect(lambda: self.focus_clicked() if self.focus or self.rest_break else self.start_focus())
-        for index in range(5):
-            QShortcut(QKeySequence(f"Ctrl+{index+1}"), self).activated.connect(lambda i=index: self.navigate(i))
+        for position, index in enumerate(NAV_ORDER):  # Ctrl+1… in sidebar order
+            QShortcut(QKeySequence(f"Ctrl+{position+1}"), self).activated.connect(lambda i=index: self.navigate(i))
         self.restore_window()
         self.preferences_timer = QTimer(self); self.preferences_timer.setSingleShot(True); self.preferences_timer.setInterval(600); self.preferences_timer.timeout.connect(self.save_preferences)
         self.sub_limit_timer = QTimer(self); self.sub_limit_timer.setSingleShot(True); self.sub_limit_timer.setInterval(600)
@@ -752,11 +755,11 @@ class App(Shell):
     # ── tray and window ───────────────────────────────────────────────
     def build_tray(self):
         self.tray = QSystemTrayIcon(icon("logo", ACCENT, 32), self)
-        self.tray.setToolTip("专注时间助手 · 正在记录")
+        self.tray.setToolTip("拾光 · 正在记录")
         menu = QMenu()
         self.tray_today = menu.addAction(""); self.tray_today.setEnabled(False); menu.addSeparator()
         menu.aboutToShow.connect(self.update_tray_menu)
-        menu.addAction("打开专注时间助手", self.bring_forward)
+        menu.addAction("打开拾光", self.bring_forward)
         self.tray_focus = menu.addAction("开始专注", self.tray_focus_action)
         self.tray_pause = menu.addAction("暂停记录", self.toggle_pause)
         later = menu.addMenu("暂停一段时间")
@@ -855,7 +858,10 @@ class App(Shell):
             self.config["window"] = state; self.config["page"] = page; save_config(self.config_path, self.config)
 
     def focus_search(self):
-        self.navigate(2); self.search.setFocus(); self.search.selectAll()
+        """Ctrl+F: the search of the 应用与网站 page when it is open, else the activity manager's."""
+        field = self.apps_search if self.pages.currentIndex() == 5 else self.search
+        if field is self.search: self.navigate(2)
+        field.setFocus(); field.selectAll()
 
     # ── sampling ──────────────────────────────────────────────────────
     def settle(self):
@@ -912,7 +918,7 @@ class App(Shell):
             if windows.paths_version != self.paths_seen:  # a program path was learned: rebuild rows for its icon and name
                 self.paths_seen = windows.paths_version; self.manager_signature = None
             if self.browser.icon_version != self.icon_version:  # a site icon arrived from the extension
-                self.icon_version = self.browser.icon_version; appicons.clear(); self.manager_signature = None
+                self.icon_version = self.browser.icon_version; appicons.clear_sites(); self.manager_signature = None
             self.update_tray_icon()
             if self.ticks % TRAY_TIP_EVERY == 0: self.update_tray_tip()
         except Exception:
@@ -1062,7 +1068,7 @@ class App(Shell):
         from PySide6.QtWidgets import QFileDialog
         import sqlite3
         base = self.project/"exports"; base.mkdir(exist_ok=True)
-        path, _ = QFileDialog.getSaveFileName(self, "备份记录数据", str(base/f"专注时间备份_{datetime.now():%Y%m%d_%H%M}.sqlite3"), "记录数据库 (*.sqlite3)")
+        path, _ = QFileDialog.getSaveFileName(self, "备份记录数据", str(base/f"拾光备份_{datetime.now():%Y%m%d_%H%M}.sqlite3"), "记录数据库 (*.sqlite3)")
         if not path: return
         self.settle(); self.store.flush()
         try:
@@ -1135,7 +1141,7 @@ class App(Shell):
     def update_tray_tip(self):
         totals = self.store.totals(datetime.now().date().isoformat())
         state = "已暂停" if self.paused else "正在记录"
-        self.tray.setToolTip(f"专注时间助手 · {state}\n今日工作 {short_time(totals['work'])} · 摸鱼 {short_time(totals['distraction'])}")
+        self.tray.setToolTip(f"拾光 · {state}\n今日工作 {short_time(totals['work'])} · 摸鱼 {short_time(totals['distraction'])}")
 
     # ── refresh ───────────────────────────────────────────────────────
     def refresh(self, force=False):
@@ -1149,6 +1155,7 @@ class App(Shell):
         elif index == 3 and force and self.settings_stack.currentIndex() == 1: self.refresh_rules()
         elif index == 3 and force and self.settings_stack.currentIndex() == 2: self.refresh_subs()
         elif index == 4: self.refresh_connection()
+        elif index == 5 and (force or self.ticks % ANALYSIS_EVERY == 0): self.refresh_app_totals()
 
     def refresh_header(self):
         today = datetime.now()
@@ -1208,7 +1215,7 @@ class App(Shell):
             restyle(value, f"color:{SUBTLE};" if left_out else "")
             self.stat_cards[key].bar.set_ratio(counted[key]/total if total else 0)
         current = self.current; category = "idle" if self.paused else current.category
-        name = ("专注时间助手（本窗口）" if self.own_window else self.background if self.background else
+        name = ("拾光（本窗口）" if self.own_window else self.background if self.background else
                 (site_name(current.host) if current.host else current.site) or app_name(current.app) or "等待前台活动")
         set_text(self.now_label, "记录已暂停" if self.paused else name)
         self.now_label.setToolTip(current.host or current.app or "")
@@ -1494,6 +1501,90 @@ class App(Shell):
             item.setForeground(QColor(INK if day_ratio is not None else SUBTLE)); self.history_table.setItem(row, len(CATEGORIES)+1, item)
         # Show every day without an inner scrollbar; the page itself scrolls.
         self.history_table.setFixedHeight(self.history_table.horizontalHeader().height()+40*len(days)+4)
+
+    def choose_apps_scope(self):
+        self.config["apps_range"] = self.apps_scope.currentData(); save_config(self.config_path, self.config)
+        self.apps_page = 0; self.refresh_app_totals()
+
+    def apps_filter_changed(self):
+        """Another category or search: start on the first page."""
+        self.apps_page = 0; self.refresh_app_totals()
+
+    def choose_apps_page_size(self):
+        """Keep the first row on screen in view when the page size changes."""
+        first = self.apps_page*self.config["apps_page_size"]
+        self.config["apps_page_size"] = self.apps_size.currentData(); save_config(self.config_path, self.config)
+        self.apps_page = first//self.config["apps_page_size"]; self.refresh_app_totals()
+
+    def turn_apps_page(self, step):
+        self.apps_page += step; self.refresh_app_totals()
+        bar = self.apps_view.verticalScrollBar(); bar.setValue(min(bar.value(), self.apps_card.y()))  # back to the top of the list
+
+    def refresh_app_totals(self):
+        """应用与网站 page: each program and website with its total time, everything recorded so far or the
+        last days, all categories or one, filtered by the search; 小类 as a tag, days used and the daily average."""
+        kind = self.apps_kind.currentData(); scope = self.apps_scope.currentData(); everything = scope == "all"
+        today = datetime.now().date(); last_day = today.isoformat()
+        if everything:
+            begin, recorded = self.store.record_span(); first_day = begin or last_day
+        else:
+            first_day = (today-timedelta(days=int(scope)-1)).isoformat()
+        # One row per name: a website's subdomains (www.douyin.com, live.douyin.com) are one 抖音; programs
+        # stay apart from websites (Claude the program, claude.ai the site). The icon is the busiest part's.
+        merged = {}
+        for app, host, seconds, days, split in self.store.app_totals(first_day, last_day, kind):
+            name = label(app, host); group = ("site", name) if host else ("app", app)
+            entry = merged.get(group)
+            if entry is None:
+                merged[group] = {"app": app, "host": host, "name": name, "seconds": seconds, "days": set(days), "split": dict(split), "parts": [host or app]}
+            else:
+                entry["seconds"] += seconds; entry["days"] |= days; entry["parts"].append(host or app)
+                for cat, value in split.items(): entry["split"][cat] = entry["split"].get(cat, 0.0)+value
+        rows = sorted(merged.values(), key=lambda e: e["seconds"], reverse=True)
+        query = self.apps_search.text().strip().lower()
+        if query: rows = [e for e in rows if query in e["name"].lower() or any(query in part.lower() for part in e["parts"])]
+        single = first_day == last_day; total = sum(e["seconds"] for e in rows); what = LABELS[kind] if kind else ""
+        if everything:
+            start = datetime.fromisoformat(first_day).date()
+            year = f"{start.year}年" if start.year != today.year else ""
+            when = f"{year}{start.month}月{start.day}日起 {recorded} 天有记录" if begin else "还没有记录"
+        else:
+            when = self.range_name(first_day, last_day)
+        found = f"找到 {len(rows)} 个" if query else f"{len(rows)} 个"
+        set_text(self.apps_note, f"{when} · {found}{what}应用和网站 · 合计 {short_time(total)}" if rows else when)
+        self.apps_note.setToolTip(self.apps_note.text())
+        size = self.config["apps_page_size"]; pages = max(1, -(-len(rows)//size))
+        self.apps_page = max(0, min(self.apps_page, pages-1)); begin_row = self.apps_page*size
+        self.apps_pager.setVisible(len(rows) > 20)
+        set_text(self.apps_page_label, f"第 {self.apps_page+1} / {pages} 页")
+        self.apps_page_label.setToolTip(f"第 {begin_row+1}–{min(len(rows), begin_row+size)} 个，共 {len(rows)} 个")
+        self.apps_prev.setEnabled(self.apps_page > 0); self.apps_next.setEnabled(self.apps_page < pages-1)
+        self.apps_last = {}; items = []
+        for entry in rows[begin_row:begin_row+size]:
+            app, host, seconds, name, split = entry["app"], entry["host"], entry["seconds"], entry["name"], entry["split"]
+            days, last_used = len(entry["days"]), max(entry["days"]); parts = entry["parts"]
+            category = kind or max(split, key=split.get); key = host or app
+            sid = subcats.lookup(category, app, host, self.config) if category in ("work", "distraction") else ""
+            sub = self.sub_name(category, sid) if sid else ""
+            tag = sub if kind else LABELS[category]+(f" · {sub}" if sub else "")
+            cells = [(short_time(seconds), None), (share(seconds, total), SUBTLE)]
+            if not single: cells += [(f"{days} 天", None), (short_time(seconds/days), None)]
+            lines = [name+(f"（{'、'.join(parts[:3])}{' 等' if len(parts) > 3 else ''}）" if host and (len(parts) > 1 or host != name) else ""),
+                     f"{'累计' if everything else '合计'} {short_time(seconds)}"+("" if single else f"，用过 {days} 天，日均 {short_time(seconds/days)}")]
+            parts_by_category = [(c, s) for c, s in sorted(split.items(), key=lambda x: -x[1]) if s >= 60]
+            if len(parts_by_category) > 1 and not kind:  # 工作 3秒 next to 摸鱼 51小时 is noise
+                lines.append("其中 "+"、".join(f"{LABELS[c]} {short_time(s)}" for c, s in parts_by_category))
+            if not single: lines.append(f"最近一次 {self.day_name(last_used)}")
+            lines.append("点击在活动管理里查看"+("那一天" if single else "最近一次那天"))
+            items.append((key, name, tag, seconds, category, cells, "\n".join(lines)))
+            self.apps_last[key] = (last_used, name if len(parts) > 1 else key)  # several subdomains: search by the name
+        self.app_totals.set_data(items, ("时长", "占比") if single else ("总时长" if everything else "合计", "占比", "用了", "日均"),
+                                 f"没有找到“{self.apps_search.text().strip()}”。" if query else
+                                 f"{'还没有' if everything else '这段时间没有'}{what}应用和网站的记录。", top=rows[0]["seconds"] if rows else 0, first_rank=begin_row+1)
+
+    def app_total_chosen(self, key):
+        day, query = self.apps_last.get(key, (None, key))
+        self.open_manager(category=self.apps_kind.currentData(), day=day, query=query)
 
     def refresh_rhythm(self, first_day, last_day):
         """工作节奏: longest stretch, deep work, switching and the usual start / end of the day."""
@@ -2161,7 +2252,7 @@ class App(Shell):
                 self.startup_link.parent.mkdir(parents=True, exist_ok=True)
                 script = ("$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:FOCUS_LINK);"
                           "$s.TargetPath=$env:FOCUS_TARGET;$s.Arguments=$env:FOCUS_ARGS;$s.WorkingDirectory=$env:FOCUS_DIR;"
-                          "$s.IconLocation=$env:FOCUS_TARGET+',0';$s.Description='专注时间助手';$s.Save()")
+                          "$s.IconLocation=$env:FOCUS_TARGET+',0';$s.Description='拾光';$s.Save()")
                 env = dict(os.environ, FOCUS_LINK=str(self.startup_link), FOCUS_TARGET=str(target), FOCUS_ARGS=arguments,
                            FOCUS_DIR=str(target.parent))
                 subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], env=env, check=True,
@@ -2223,8 +2314,8 @@ class App(Shell):
         if not parent: return
         fmt = self.config["export_format"]; stamp = f"{datetime.now():%H%M%S}"
         # A lone HTML report is saved as one file; CSV tables get their own folder.
-        folder = Path(parent) if fmt == "html" else Path(parent)/f"专注时间报告_{span}_{stamp}"
-        name = f"专注时间报告_{span}_{stamp}" if fmt == "html" else "专注时间报告"
+        folder = Path(parent) if fmt == "html" else Path(parent)/f"拾光报告_{span}_{stamp}"
+        name = f"拾光报告_{span}_{stamp}" if fmt == "html" else "拾光报告"
         try:
             written = report.export(self.store, folder, first.isoformat(), last.isoformat(), parts, fmt,
                                     P["accent"] if not P["dark"] else "#4B5FE0", self.config["focus_includes_unknown"], name)
@@ -2239,7 +2330,7 @@ class App(Shell):
         import csv
         from PySide6.QtWidgets import QFileDialog
         directory = self.project/"exports"; directory.mkdir(exist_ok=True)
-        default = directory/f"{days[0]}_{days[-1]}_专注时间_{datetime.now():%H%M%S}.csv"
+        default = directory/f"{days[0]}_{days[-1]}_拾光_{datetime.now():%H%M%S}.csv"
         name, _ = QFileDialog.getSaveFileName(self, "导出时间记录", str(default), "CSV 文件 (*.csv)")
         if not name: return
         try:
@@ -2257,7 +2348,7 @@ class App(Shell):
         self.hide()
         if not self.tray_hinted and self.config["tray_hint"]:
             self.tray_hinted = True
-            self.tray.showMessage("专注时间助手仍在记录", "点击托盘图标打开；右键可暂停或退出。", QSystemTrayIcon.MessageIcon.Information, 3000)
+            self.tray.showMessage("拾光仍在记录", "点击托盘图标打开；右键可暂停或退出。", QSystemTrayIcon.MessageIcon.Information, 3000)
         QTimer.singleShot(2000, self.trim_if_hidden)
 
     def closeEvent(self, event):

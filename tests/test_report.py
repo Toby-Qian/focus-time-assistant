@@ -46,8 +46,8 @@ class ReportTests(unittest.TestCase):
         out = Path(self.folder.name)/"report"
         written = report.export(self.store, out, "2026-11-09", "2026-11-10", ["daily", "apps", "hours", "sessions", "details"], "both", "#4B5FE0")
         names = {path.name for path in written}
-        self.assertIn("专注时间报告.html", names); self.assertIn("每日汇总.csv", names); self.assertIn("专注记录.csv", names)
-        html = (out/"专注时间报告.html").read_text(encoding="utf-8")
+        self.assertIn("拾光报告.html", names); self.assertIn("每日汇总.csv", names); self.assertIn("专注记录.csv", names)
+        html = (out/"拾光报告.html").read_text(encoding="utf-8")
         self.assertIn("www.bilibili.com", html); self.assertIn("50分钟", html); self.assertIn("<svg", html)
         daily = (out/"每日汇总.csv").read_text(encoding="utf-8-sig").splitlines()
         self.assertEqual(daily[1].split(",")[:2], ["2026-11-09", "3000"])

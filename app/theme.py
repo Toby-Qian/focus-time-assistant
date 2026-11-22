@@ -122,7 +122,7 @@ def use(name):
 
 APP_NAMES = {"codex.exe": "Codex", "chatgpt.exe": "Codex / ChatGPT", "claude.exe": "Claude", "code.exe": "Visual Studio Code",
              "chrome.exe": "Google Chrome", "msedge.exe": "Microsoft Edge", "winword.exe": "Word", "excel.exe": "Excel",
-             "powerpnt.exe": "PowerPoint", "zotero.exe": "Zotero", "python.exe": "Python", "专注时间助手.exe": "专注时间助手", "explorer.exe": "文件资源管理器",
+             "powerpnt.exe": "PowerPoint", "zotero.exe": "Zotero", "python.exe": "Python", "专注时间助手.exe": "拾光", "explorer.exe": "文件资源管理器",
              "firefox.exe": "Firefox", "windowsterminal.exe": "Windows Terminal", "pythonw.exe": "Python", "matlab.exe": "MATLAB", "wechat.exe": "微信", "weixin.exe": "微信", "qq.exe": "QQ"}
 
 
@@ -293,11 +293,26 @@ QCalendarWidget QAbstractItemView:enabled {{ selection-background-color:{p['acce
 """
 
 
+def draw_logo(p, color, width=1.7):
+    """拾光: a clock face open at the upper right, where a four-point spark sits; on the 24-unit grid."""
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QPolygonF
+    p.setPen(QPen(QColor(color), width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawArc(QRectF(3, 3, 18, 18), 60*16, 315*16)  # from 2 o'clock round to just above 3 o'clock
+    p.drawLine(QPointF(12, 7), QPointF(12, 12)); p.drawLine(QPointF(12, 12), QPointF(15.5, 14))
+    p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(color))
+    p.drawPolygon(QPolygonF([QPointF(x, y) for x, y in ((20, 1.2), (20.8, 3.2), (22.8, 4), (20.8, 4.8), (20, 6.8), (19.2, 4.8), (17.2, 4), (19.2, 3.2))]))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+
+
 def _draw(p, kind, color):
     pen = QPen(QColor(color), 1.7, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
     p.setPen(pen); p.setBrush(Qt.BrushStyle.NoBrush)
     fill = QColor(color)
-    if kind in ("clock", "logo"):
+    if kind == "logo":
+        draw_logo(p, color)
+    elif kind == "clock":
         p.drawEllipse(QRectF(3, 3, 18, 18)); p.drawLine(12, 7, 12, 12); p.drawLine(12, 12, 16, 14)
     elif kind == "overview":
         for x, y in [(3, 3), (14, 3), (3, 14), (14, 14)]: p.drawRoundedRect(QRectF(x, y, 7, 7), 1.5, 1.5)
@@ -350,6 +365,9 @@ def _draw(p, kind, color):
         p.drawEllipse(QRectF(3, 3, 18, 18)); p.drawLine(12, 12, 12, 3); p.drawLine(12, 12, 19.5, 16.5)
     elif kind == "rank":
         p.drawLine(4, 20, 20, 20); p.drawRoundedRect(QRectF(4, 12, 4, 8), 1, 1); p.drawRoundedRect(QRectF(10, 5, 4, 15), 1, 1); p.drawRoundedRect(QRectF(16, 9, 4, 11), 1, 1)
+    elif kind == "apps":  # 应用与网站: an icon square and a shorter bar per row
+        for y, end in ((5, 21), (12, 18), (19, 14)):
+            p.drawRoundedRect(QRectF(3, y-2.5, 5, 5), 1.2, 1.2); p.drawLine(11, y, end, y)
     elif kind == "calendar":
         p.drawRoundedRect(QRectF(3, 5, 18, 16), 2.5, 2.5); p.drawLine(3, 10, 21, 10); p.drawLine(8, 3, 8, 7); p.drawLine(16, 3, 16, 7)
         p.drawPoint(8, 14); p.drawPoint(12, 14); p.drawPoint(16, 14); p.drawPoint(8, 17.5); p.drawPoint(12, 17.5)

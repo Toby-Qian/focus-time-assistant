@@ -70,6 +70,7 @@ _names = {}
 paths = {}          # program name → full .exe path, for list icons (see appicons.py)
 paths_dirty = False
 paths_version = 0   # bumped whenever a path is learned, so cached icons refresh
+learned = set()     # programs whose path was learned since appicons last looked: only their icons are redrawn
 _missing = {}       # program name → monotonic time of the last failed lookup
 _descriptions = {}  # .exe path → its FileDescription (or ProductName)
 k.K32EnumProcesses.argtypes = [c.POINTER(w.DWORD), w.DWORD, c.POINTER(w.DWORD)]
@@ -82,7 +83,7 @@ _ver.VerQueryValueW.argtypes = [w.LPCVOID, w.LPCWSTR, c.POINTER(w.LPVOID), c.POI
 def _learn(name, full):
     global paths_dirty, paths_version
     if full and paths.get(name) != full:
-        paths[name] = full; paths_dirty = True; paths_version += 1
+        paths[name] = full; paths_dirty = True; paths_version += 1; learned.add(name)
 
 
 def find_path(name):

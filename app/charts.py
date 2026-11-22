@@ -5,8 +5,8 @@ infer data from legacy daily aggregates.
 """
 import math
 
-from PySide6.QtCore import Qt, QEasingCurve, QRectF, QVariantAnimation, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
+from PySide6.QtCore import Qt, QEasingCurve, QPointF, QRectF, QVariantAnimation, Signal
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QWidget, QToolTip
 from PySide6.QtWidgets import QApplication
 
@@ -475,6 +475,155 @@ class SubBars(QWidget):
         index = self.row_at(event.position())
         if index is not None and event.button() == Qt.MouseButton.LeftButton:
             self.hover = None; hide_tooltip(); self.update(); self.chosen.emit(self.category, self.rows[index][0])
+
+
+class AppTotals(QWidget):
+    """Programs and websites with their total time, as a ranked table: rank; icon; name and a tag
+    (分类 in its colour · 小类) with a bar under them; then right-aligned figures, the total first.
+    Painted as one widget, like SubBars.
+
+    Rows are (key, name, tag, seconds, category, cells, tip); a cell is (text, colour or None).
+    Every text is placed on whole device pixels: at 125 % / 150 % a baseline between two pixel rows
+    smears horizontal strokes, which reads as blurry next to Qt's own labels.
+    """
+    chosen = Signal(str)  # the row's key
+    ROW = 56; HEAD = 30; ICON = 26; RANK_W = 30; BAR_H = 4; BAR_MAX = 520  # px
+    NAME_PX, TAG_PX, TOTAL_PX, NUM_PX, HEAD_PX, RANK_PX = 16, 13, 16, 15, 12, 13
+    FIGURE_SPACING = 0.4  # px between figures: a touch looser than the face's own, easier to read
+
+    def __init__(self):
+        super().__init__(); self.setMouseTracking(True)
+        self.rows = []; self.heads = []; self.empty = ""; self.hover = None; self.signature = None; self.measured = None
+        self.top = 1.0; self.first_rank = 1
+        self.setFixedHeight(self.height_for(1))
+
+    @classmethod
+    def figure_font(cls, px, weight=QFont.Weight.Normal):
+        """Times and counts as in 时间分析 (“和前一天比”): the numeral face, heavier, slightly spaced."""
+        f = font(px, weight, "num"); f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, cls.FIGURE_SPACING)
+        return f
+
+    def fonts(self):
+        if not hasattr(self, "_fonts"):
+            self._fonts = {"name": font(self.NAME_PX), "tag": font(self.TAG_PX), "head": font(self.HEAD_PX),
+                           "total": self.figure_font(self.TOTAL_PX, QFont.Weight.DemiBold), "num": self.figure_font(self.NUM_PX, QFont.Weight.Medium),
+                           "rank": self.figure_font(self.RANK_PX)}
+            self._metrics = {k: QFontMetrics(v) for k, v in self._fonts.items()}
+        return self._fonts, self._metrics
+
+    def height_for(self, count):
+        return (self.HEAD if self.heads else 0)+count*self.ROW
+
+    def snap(self, value):
+        """The nearest whole device pixel, in logical units."""
+        dpr = self.devicePixelRatioF() or 1.0
+        return round(value*dpr)/dpr
+
+    def text_at(self, p, metrics, x, middle, text):
+        """Draw `text` from x with its glyphs centred on `middle`, baseline on a device pixel."""
+        p.drawText(QPointF(self.snap(x), self.snap(middle+(metrics.ascent()-metrics.descent())/2)), text)
+
+    def measure(self):
+        """Columns and each row's name / tag fit, kept until the data or the width changes:
+        scrolling and hovering only repaint."""
+        width = self.width()
+        if self.measured and self.measured[0] == (self.signature, width): return self.measured[1]
+        _, m = self.fonts()
+        count = max(len(r[5]) for r in self.rows); gap = 40 if width >= 900 else 26
+        widths = []
+        for i in range(count):  # each column as wide as its widest figure or heading
+            figure = m["total"] if i == 0 else m["num"]
+            widths.append(max([figure.horizontalAdvance(r[5][i][0]) for r in self.rows if i < len(r[5])]+
+                              [m["head"].horizontalAdvance(self.heads[i]) if i < len(self.heads) else 0]))
+        rights, x = [], float(width)
+        for w in reversed(widths): rights.insert(0, x); x -= w+gap
+        name_left = self.RANK_W+self.ICON+14
+        area = max(60.0, x+gap-28-name_left)  # name, tag and bar end well before the first figure
+        fits = []
+        for _, name, tag, *_ in self.rows:
+            label, _, rest = tag.partition(" · ")
+            tag_width = m["tag"].horizontalAdvance(tag)+12 if tag else 0
+            room = max(min(m["name"].horizontalAdvance(name)+2, area*.55), area-tag_width)
+            shown = m["name"].elidedText(name, Qt.TextElideMode.ElideMiddle, int(room)); used = m["name"].horizontalAdvance(shown)
+            left = max(0, area-used-12)
+            first = m["tag"].elidedText(label, Qt.TextElideMode.ElideRight, int(left))
+            second = m["tag"].elidedText(" · "+rest, Qt.TextElideMode.ElideRight, int(left-m["tag"].horizontalAdvance(first))) if rest and first == label else ""
+            fits.append((shown, used, first, second))
+        layout = (rights, name_left, min(area, self.BAR_MAX), fits)
+        self.measured = ((self.signature, width), layout)
+        return layout
+
+    def set_data(self, rows, heads=(), empty="", top=0, first_rank=1):
+        """top: the time a full bar stands for (the biggest of the whole list when this is one page of it);
+        first_rank: the rank of the first row (pages after the first go on counting)."""
+        signature = (tuple((r[0], r[1], r[2], int(r[3]), r[4], tuple(r[5]), r[6]) for r in rows), tuple(heads), empty, int(top), first_rank)
+        if signature == self.signature: return
+        self.signature = signature; self.rows, self.heads, self.empty = list(rows), list(heads) if rows else [], empty
+        self.top = max([top, 1.0]+[r[3] for r in rows]); self.first_rank = first_rank
+        self.hover = None; self.setFixedHeight(self.height_for(max(1, len(self.rows)))); self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self); p.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.TextAntialiasing)
+        in_view = event.rect()  # only rows in view: a long list would otherwise load every program icon at once
+        width = self.width(); f, m = self.fonts()
+        if not self.rows:
+            p.setFont(f["name"]); p.setPen(QColor(MUTED)); self.text_at(p, m["name"], 0, self.ROW/2, self.empty); return
+        rights, name_left, bar_area, fits = self.measure()
+        y = 0.0
+        if self.heads:
+            p.setFont(f["head"]); p.setPen(QColor(SUBTLE))
+            for title, edge in zip(self.heads, rights):
+                if title: self.text_at(p, m["head"], edge-m["head"].horizontalAdvance(title), self.HEAD/2-2, title)
+            y = self.HEAD
+            p.setPen(QPen(QColor(P["line"]), 1)); p.drawLine(QPointF(0, self.snap(y)-.5), QPointF(width, self.snap(y)-.5))
+        from appicons import icon_for
+        for index, (key, name, tag, seconds, category, cells, _) in enumerate(self.rows):
+            row_y = y+index*self.ROW
+            if row_y+self.ROW < in_view.top() or row_y > in_view.bottom()+1: continue
+            if index == self.hover:
+                p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(P["row_hover"])); p.drawRoundedRect(QRectF(-8, row_y+3, width+16, self.ROW-6), 8, 8)
+            elif index and index-1 != self.hover:  # inset rule under the names, not across the icons
+                p.setPen(QPen(QColor(P["row_line"]), 1)); p.drawLine(QPointF(name_left, self.snap(row_y)+.5), QPointF(width, self.snap(row_y)+.5))
+            middle = row_y+self.ROW/2
+            rank = str(self.first_rank+index)
+            p.setFont(f["rank"]); p.setPen(QColor(SUBTLE)); self.text_at(p, m["rank"], self.RANK_W-10-m["rank"].horizontalAdvance(rank), middle, rank)
+            icon_for(key, category).paint(p, self.RANK_W, round(self.snap(middle-self.ICON/2)), self.ICON, self.ICON)
+            shown, used, first, second = fits[index]
+            line = middle-7  # name line; the bar sits under it
+            p.setFont(f["name"]); p.setPen(QColor(INK)); self.text_at(p, m["name"], name_left, line, shown)
+            if first:  # 分类 in its colour (or the 小类 alone when one category is shown), then · 小类
+                x = name_left+used+12
+                p.setFont(f["tag"]); p.setPen(QColor(TEXTS[category] if second or first in CATEGORIES.values() else MUTED))
+                self.text_at(p, m["tag"], x, line+1, first)
+                if second: p.setPen(QColor(MUTED)); self.text_at(p, m["tag"], x+m["tag"].horizontalAdvance(first), line+1, second)
+            length = max(self.BAR_H, bar_area*seconds/self.top)
+            p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(COLORS[category]))
+            p.drawRoundedRect(QRectF(name_left, self.snap(middle+9), length, self.BAR_H), self.BAR_H/2, self.BAR_H/2)
+            for i, ((text, tone), edge) in enumerate(zip(cells, rights)):
+                key_font = "total" if i == 0 else "num"
+                p.setFont(f[key_font]); p.setPen(QColor(tone if tone and tone != SUBTLE else INK if i == 0 else P["body"]))
+                self.text_at(p, m[key_font], edge-m[key_font].horizontalAdvance(text), middle, text)
+
+    def row_at(self, point):
+        y = point.y()-(self.HEAD if self.heads else 0)
+        index = int(y//self.ROW) if y >= 0 else -1
+        return index if 0 <= index < len(self.rows) else None
+
+    def mouseMoveEvent(self, event):
+        index = self.row_at(event.position())
+        if index == self.hover: return
+        self.hover = index; self.update()
+        self.setCursor(Qt.CursorShape.PointingHandCursor if index is not None else Qt.CursorShape.ArrowCursor)
+        if index is None: hide_tooltip()
+        else: QToolTip.showText(event.globalPosition().toPoint(), self.rows[index][6], self)
+
+    def leaveEvent(self, _):
+        if self.hover is not None: self.hover = None; self.update()
+
+    def mousePressEvent(self, event):
+        index = self.row_at(event.position())
+        if index is not None and event.button() == Qt.MouseButton.LeftButton:
+            self.hover = None; hide_tooltip(); self.update(); self.chosen.emit(self.rows[index][0])
 
 
 class Timeline(QWidget):

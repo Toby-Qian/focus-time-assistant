@@ -116,7 +116,7 @@ def html_report(data, parts, accent, include_unknown=True):
              ("摸鱼合计", short_time(s["distraction"])), ("专注率", f"{data['focus']:.0%}" if data["focus"] is not None else "—"),
              ("有记录天数", f"{data['active']} 天"), ("完成专注", f"{completed} 次")]
     out = [f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>专注时间报告 {data['first']} – {data['last']}</title><style>
+<title>拾光报告 {data['first']} – {data['last']}</title><style>
 :root{{--accent:{accent};--ink:#18213A;--muted:#56627A;--line:#E5E9F1;--bg:#F4F6FA}}
 *{{box-sizing:border-box}} body{{margin:0;background:var(--bg);color:var(--ink);font:14px/1.6 "Microsoft YaHei UI","PingFang SC",sans-serif}}
 main{{max-width:980px;margin:0 auto;padding:32px 20px 60px}} h1{{margin:0;font-size:28px}} h2{{font-size:17px;margin:0 0 14px}}
@@ -129,7 +129,7 @@ td{{padding:7px 8px;border-bottom:1px solid #F0F2F7}} .num{{font-family:"Segoe U
 .chart{{width:100%;height:auto}} .grid{{stroke:#F0F2F6}} .axis{{fill:#667186;font-size:11px}} .insights{{margin:0;padding:0;list-style:none}} .insights li{{padding:6px 0;border-bottom:1px solid #F0F2F7}} .insights li:last-child{{border:0}} .legend span{{margin-right:14px;color:var(--muted);font-size:12px}}
 details summary{{cursor:pointer;color:var(--accent)}} footer{{color:var(--muted);font-size:12px;text-align:center;margin-top:24px}}
 .accent{{height:6px;background:var(--accent);border-radius:3px;width:64px;margin-bottom:14px}}
-</style></head><body><main><div class="accent"></div><h1>专注时间报告</h1>
+</style></head><body><main><div class="accent"></div><h1>拾光报告</h1>
 <p class="sub">{data['first']} 至 {data['last']} · 共 {len(data['days'])} 天 · 生成于 {datetime.now():%Y-%m-%d %H:%M}</p>
 <div class="tiles">{''.join(f'<div class="tile"><span>{t}</span><b>{v}</b></div>' for t, v in tiles)}</div>"""]
     if data.get("insights"):  # sentences are built by insights.py from numbers only; <b> marks the key figure
@@ -175,11 +175,11 @@ details summary{{cursor:pointer;color:var(--accent)}} footer{{color:var(--muted)
             out += [f"<tr><td><i class='dot' style='background:{COLORS[c]}'></i>{CATEGORIES[c]}</td><td>{escape(app_name(a) or '离开 / 锁屏')}</td><td>{escape(site_name(h)+('（'+h+'）' if site_name(h) != h else '') if h else '—')}</td><td class='num'>{hms(s)}</td></tr>" for c, a, h, s in entries]
             out.append("</table></details>")
         out.append("</section>")
-    out.append("<footer>由专注时间助手在本机生成 · 数据只来自这台电脑</footer></main></body></html>")
+    out.append("<footer>由拾光在本机生成 · 数据只来自这台电脑</footer></main></body></html>")
     return "".join(out)
 
 
-def export(store, folder: Path, first, last, parts, fmt, accent, include_unknown=True, name="专注时间报告"):
+def export(store, folder: Path, first, last, parts, fmt, accent, include_unknown=True, name="拾光报告"):
     """Write the report into `folder` and return the written paths."""
     data = collect(store, first, last, include_unknown)
     folder.mkdir(parents=True, exist_ok=True); written = []
